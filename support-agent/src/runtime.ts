@@ -39,8 +39,25 @@ export interface RuntimeDeps {
 
 const OWNERS = 5_000
 const OWNER_TTL_MS = 60 * 60 * 1000
-export const LISTEN_BACKOFF_MS = 500
+export const LISTEN_BACKOFF_MS = 1_000
 export const LISTEN_BACKOFF_MAX_MS = 30_000
+
+const TRANSIENT_HTTP = new Set([408, 429, 502, 503, 504])
+const CONNECTION_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT",
+])
 
 export function sleepBackoff(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted || ms <= 0) return Promise.resolve()
@@ -55,28 +72,74 @@ export function sleepBackoff(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-/** Reconnect until `signal` aborts. A clean listen return is a dropped stream. */
+/** Retry transient listen failures until `signal` aborts. Auth and other failures propagate. */
 export async function listenWithRetry(
   connect: () => Promise<void>,
   signal: AbortSignal,
   sleep: (ms: number, signal: AbortSignal) => Promise<void> = sleepBackoff,
+  random: () => number = Math.random,
 ): Promise<void> {
   let delay = LISTEN_BACKOFF_MS
   while (!signal.aborted) {
     let failed = false
     try {
       await connect()
+      delay = LISTEN_BACKOFF_MS
     } catch (err) {
       if (signal.aborted) return
-      if (err instanceof ConfigError) throw err
+      const code = transientListenCode(err)
+      if (!code) throw err
       failed = true
-      logLine("warn", "listen_retry", { error_code: "listen_failed" })
+      logLine("warn", "listen_retry", { error_code: code })
     }
     if (signal.aborted) return
     if (!failed) logLine("warn", "listen_retry", { error_code: "listen_ended" })
-    await sleep(delay, signal)
-    delay = Math.min(delay * 2, LISTEN_BACKOFF_MAX_MS)
+    await sleep(listenDelay(delay, random()), signal)
+    if (failed) delay = Math.min(delay * 2, LISTEN_BACKOFF_MAX_MS)
   }
+}
+
+function listenDelay(base: number, random: number): number {
+  const unit = Number.isFinite(random) ? Math.min(1, Math.max(0, random)) : 0
+  return Math.round(base * (0.5 + unit * 0.5))
+}
+
+function transientListenCode(err: unknown): string | undefined {
+  if (err instanceof ConfigError) return undefined
+  const status = numberField(err, "status")
+  if (status === 401 || status === 403) return undefined
+  if (status !== undefined && TRANSIENT_HTTP.has(status)) return status === 429 ? "rate_limited" : `http_${status}`
+  const code = stringField(err, "code")
+  if (code === "unauthorized" || code === "forbidden") return undefined
+  if (code === "rate_limited") return "rate_limited"
+  if (code === "network") return "network"
+  const cause = err && typeof err === "object" ? (err as { cause?: unknown }).cause : undefined
+  const causeCode = stringField(cause, "code")
+  if (CONNECTION_CODES.has(code) || CONNECTION_CODES.has(causeCode)) {
+    return code === "ETIMEDOUT" || causeCode === "ETIMEDOUT" ? "timeout" : "connection"
+  }
+  if (err instanceof Error && (err.name === "TimeoutError" || err.name === "ConnectTimeoutError" || err.name === "HeadersTimeoutError")) {
+    return "timeout"
+  }
+  if (err instanceof Error && err.name === "AuthError") return undefined
+  return undefined
+}
+
+function numberField(err: unknown, key: string): number | undefined {
+  if (!err || typeof err !== "object") return undefined
+  const value = (err as Record<string, unknown>)[key]
+  return typeof value === "number" && Number.isInteger(value) ? value : undefined
+}
+
+function stringField(err: unknown, key: string): string {
+  if (!err || typeof err !== "object") return ""
+  const value = (err as Record<string, unknown>)[key]
+  return typeof value === "string" ? value : ""
+}
+
+function pollWarnCode(line: string): string {
+  const match = /^poll_retry (http_(?:408|502|503|504)|network|timeout|connection|rate_limited)$/.exec(line)
+  return match?.[1] ?? "poll_retry"
 }
 
 export async function runSupport(env: Record<string, string | undefined>, deps?: Partial<RuntimeDeps> & { signal?: AbortSignal }): Promise<void> {
@@ -247,6 +310,11 @@ async function loadAgent(config: Config, fetchImpl?: typeof fetch): Promise<Supp
     url: config.p2aUrl,
     maxConcurrent: config.maxConcurrent,
     fetchImpl,
-    logger: { info() {} },
+    logger: {
+      info() {},
+      warn(line: string) {
+        logLine("warn", "poll_retry", { error_code: pollWarnCode(line) }, config.logLevel)
+      },
+    },
   })
 }
