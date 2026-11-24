@@ -1,0 +1,51 @@
+{
+  "note": "Repeated letters are offline test material. The signer adds the prefix at runtime.",
+  "now_ms": 1764000000000,
+  "current_ascii": "ssssssssssssssssssssssssssssssss",
+  "previous_ascii": "oooooooooooooooooooooooooooooooo",
+  "unrelated_ascii": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "request": {
+    "webhook_id": "evt_example_n8n_1",
+    "body": {
+      "binding_id": "bind_example_n8n_1",
+      "event_id": "evt_example_n8n_1",
+      "fetch_with": "claim_request",
+      "relayed": false,
+      "request_id": "req_example_n8n_1",
+      "same_owner": false,
+      "trust_reason": "",
+      "type": "request",
+      "wake_version": "0.1"
+    }
+  },
+  "verification": {
+    "webhook_id": "verify_challenge-example-n8n",
+    "body": {
+      "challenge": "challenge-example-n8n",
+      "type": "verification"
+    }
+  },
+  "test_wake": {
+    "webhook_id": "evt_example_n8n_test",
+    "body": {
+      "binding_id": "bind_example_n8n_1",
+      "event_id": "evt_example_n8n_test",
+      "type": "test",
+      "wake_version": "0.1"
+    }
+  },
+  "tampered_request": {
+    "webhook_id": "evt_example_n8n_1",
+    "body": {
+      "binding_id": "bind_example_n8n_1",
+      "event_id": "evt_example_n8n_1_changed",
+      "fetch_with": "claim_request",
+      "relayed": false,
+      "request_id": "req_example_n8n_1",
+      "same_owner": false,
+      "trust_reason": "",
+      "type": "request",
+      "wake_version": "0.1"
+    }
+  }
+}

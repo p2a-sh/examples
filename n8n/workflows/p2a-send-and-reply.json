@@ -1,0 +1,664 @@
+{
+  "id": "5b7a1291-2829-480d-1495-3eca26876d30",
+  "name": "p2a send and reply",
+  "active": false,
+  "nodes": [
+    {
+      "id": "d80082da-c6c0-5285-9162-d0eb6e77b8c3",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "f46c413d-80ac-7ac6-7999-01426bab5515",
+      "name": "input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        260,
+        200
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "dc2ffc0e-0db0-f3b5-14c9-9daf15f90e8a",
+              "name": "to",
+              "value": "={{ $env.P2A_RECIPIENT }}",
+              "type": "string"
+            },
+            {
+              "id": "e36affe5-d886-fcbc-f2bb-c161bd32194f",
+              "name": "text",
+              "value": "={{ \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "d1db5359-1224-5ae3-a375-58fee919bd5a",
+              "name": "confirm",
+              "value": "={{ false }}",
+              "type": "boolean"
+            },
+            {
+              "id": "2c82f473-bf02-e344-d2f1-8f7089ba49c2",
+              "name": "idempotency_key",
+              "value": "={{ $execution.id }}-send",
+              "type": "string"
+            },
+            {
+              "id": "0555f575-43e6-1dba-3efb-032806fc9683",
+              "name": "request_id",
+              "value": "={{ \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "08cc568d-902c-d78e-fbd6-877727dd5942",
+              "name": "attempt",
+              "value": "={{ 0 }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      }
+    },
+    {
+      "id": "ce9241a8-ab55-6ee2-8960-072f65b9251e",
+      "name": "has request_id?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0192c4b2-5901-f9f5-62fb-78e24abe09f4",
+              "leftValue": "={{ $json.request_id || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "5f11a03a-b6db-8c64-5806-f8592e4f9b16",
+      "name": "send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.P2A_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "accept",
+              "value": "application/json, text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"p2a_send_message\",\"arguments\":{to:$json.to,text:$json.text,wait_seconds:45,confirm:$json.confirm===true,idempotency_key:$json.idempotency_key}}}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "p2a-agent",
+          "name": "p2a agent"
+        }
+      },
+      "retryOnFail": false,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "f5a8ed26-689c-f775-8719-4cc24286d191",
+      "name": "unwrap send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        360
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "function surface(parsed) {\n  if (!parsed || typeof parsed !== 'object') {\n    return { error: { code: 'invalid_response', message: 'invalid_response' } };\n  }\n  if (typeof parsed.error === 'string') {\n    const error = {\n      code: parsed.error,\n      message: typeof parsed.message === 'string' ? parsed.message : parsed.error,\n    };\n    const status = typeof parsed.status === 'string' ? parsed.status : parsed.error;\n    return Object.assign({}, parsed, { error, status });\n  }\n  if (parsed.error && typeof parsed.error === 'object') {\n    const code = parsed.error.code === undefined || parsed.error.code === null ? 'error' : parsed.error.code;\n    const message = typeof parsed.error.message === 'string' ? parsed.error.message : String(code);\n    return Object.assign({}, parsed, { error: { code, message } });\n  }\n  return parsed;\n}\n\nfunction unwrap(payload) {\n  if (!payload || typeof payload !== 'object') {\n    return { error: { code: 'invalid_response', message: 'invalid_response' } };\n  }\n  if (payload.error) return surface(payload);\n  const result = payload.result;\n  if (!result || typeof result !== 'object') return payload;\n  const content = result.content;\n  if (!Array.isArray(content)) return result;\n  const text = content\n    .map((item) => {\n      if (!item || typeof item !== 'object') return '';\n      return item.type === 'text' && typeof item.text === 'string' ? item.text : '';\n    })\n    .join('');\n  if (!text) return result;\n  try {\n    const parsed = JSON.parse(text);\n    if (parsed && typeof parsed === 'object') return surface(parsed);\n  } catch {\n    return { text };\n  }\n  return { text };\n}\n\nif (typeof $input !== 'undefined') {\n  return $input.all().map((item, index) => ({\n    json: unwrap(item.json),\n    pairedItem: { item: index },\n  }));\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = { unwrap, surface };\n}\n"
+      }
+    },
+    {
+      "id": "f9417a47-1341-44dc-8444-bd6eee67155d",
+      "name": "after send",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1300,
+        360
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "9cd1902b-b51d-f29f-e2e0-407f2b87d9f1",
+              "name": "request_id",
+              "value": "={{ $json.request_id || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "bb7db4e1-510f-c218-bfaf-92b5adc13948",
+              "name": "attempt",
+              "value": "={{ 0 }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "3adbc12b-e833-3748-bd89-182d818acd1e",
+      "name": "pending after send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1560,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "6ab496a0-a0de-bd3f-5b28-505b27c56d5d",
+              "leftValue": "={{ $json.status || \"\" }}",
+              "rightValue": "pending",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "52bd40c8-cb6d-c0af-54df-86adbf0cb01b",
+      "name": "carry",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1820,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "42c58d0b-38ea-3d2b-1783-01ec6dba354e",
+              "name": "request_id",
+              "value": "={{ $json.request_id || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "57df8148-9d86-ad2e-cdb0-81697e0862f8",
+              "name": "attempt",
+              "value": "={{ Number($json.attempt || 0) }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "2f4de701-e29a-d111-0f67-10a12cde3b84",
+      "name": "wait",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2080,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.P2A_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "accept",
+              "value": "application/json, text/event-stream"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"p2a_wait_for_reply\",\"arguments\":{request_id:$json.request_id,wait_seconds:45}}}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "p2a-agent",
+          "name": "p2a agent"
+        }
+      },
+      "retryOnFail": false,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "7c5943ff-63f6-5300-606b-96d246f65507",
+      "name": "unwrap wait",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        80
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "function surface(parsed) {\n  if (!parsed || typeof parsed !== 'object') {\n    return { error: { code: 'invalid_response', message: 'invalid_response' } };\n  }\n  if (typeof parsed.error === 'string') {\n    const error = {\n      code: parsed.error,\n      message: typeof parsed.message === 'string' ? parsed.message : parsed.error,\n    };\n    const status = typeof parsed.status === 'string' ? parsed.status : parsed.error;\n    return Object.assign({}, parsed, { error, status });\n  }\n  if (parsed.error && typeof parsed.error === 'object') {\n    const code = parsed.error.code === undefined || parsed.error.code === null ? 'error' : parsed.error.code;\n    const message = typeof parsed.error.message === 'string' ? parsed.error.message : String(code);\n    return Object.assign({}, parsed, { error: { code, message } });\n  }\n  return parsed;\n}\n\nfunction unwrap(payload) {\n  if (!payload || typeof payload !== 'object') {\n    return { error: { code: 'invalid_response', message: 'invalid_response' } };\n  }\n  if (payload.error) return surface(payload);\n  const result = payload.result;\n  if (!result || typeof result !== 'object') return payload;\n  const content = result.content;\n  if (!Array.isArray(content)) return result;\n  const text = content\n    .map((item) => {\n      if (!item || typeof item !== 'object') return '';\n      return item.type === 'text' && typeof item.text === 'string' ? item.text : '';\n    })\n    .join('');\n  if (!text) return result;\n  try {\n    const parsed = JSON.parse(text);\n    if (parsed && typeof parsed === 'object') return surface(parsed);\n  } catch {\n    return { text };\n  }\n  return { text };\n}\n\nif (typeof $input !== 'undefined') {\n  return $input.all().map((item, index) => ({\n    json: unwrap(item.json),\n    pairedItem: { item: index },\n  }));\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = { unwrap, surface };\n}\n"
+      }
+    },
+    {
+      "id": "7818762d-4cb8-f3be-6f77-8d06d8dcb7d9",
+      "name": "after wait",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2600,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d37c91cc-3361-190d-c767-eca1a26a5a21",
+              "name": "request_id",
+              "value": "={{ $(\"carry\").item.json.request_id || $json.request_id || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "861394d0-f2e7-0b08-30d7-6da7722945ef",
+              "name": "attempt",
+              "value": "={{ Number($(\"carry\").item.json.attempt || 0) + 1 }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "7e004b89-949a-2593-4753-eb5c6bd588ab",
+      "name": "retry wait?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2860,
+        80
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "146b0786-c8c2-ed51-d036-c7a2e3e34abf",
+              "leftValue": "={{ $json.status || \"\" }}",
+              "rightValue": "pending",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "ed02f486-b740-5c32-75bb-d82c46be3f45",
+              "leftValue": "={{ Number($json.attempt || 0) }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "number",
+                "operation": "smaller"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "ce9252d4-95d3-465e-7021-23888f5eef50",
+      "name": "done",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3120,
+        360
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a61de0ce-0a16-b41a-6d0b-d1b775ad5dca",
+              "name": "status",
+              "value": "={{ $json.status || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "245a4b56-c121-c68c-12b1-67a1a03e4975",
+              "name": "summary",
+              "value": "={{ $json.status === \"pending\" ? \"still pending; resume by putting this request_id in input.request_id and executing again\" : $json.status === \"confirmation_required\" ? \"set confirm: true with the same to, text and idempotency_key\" : $json.status === \"needs_approval\" ? \"the other agent asked its human; the answer arrives later\" : $json.status === \"rate_limited\" ? \"rate limited; the workflow stopped\" : ($json.summary || ($json.reply_text ? \"reply received\" : \"done\")) }}",
+              "type": "string"
+            },
+            {
+              "id": "2b89da6a-673a-4abd-1d99-5b9c7f11f588",
+              "name": "reply_text",
+              "value": "={{ $json.reply_text || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "2180cddb-67fa-afbc-ff4d-8ad6ed256128",
+              "name": "request_id",
+              "value": "={{ $json.request_id || \"\" }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "7befbeab-3368-f159-414a-68c7f0ef77a4",
+      "name": "map send error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        560
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const priorItems = $('input').all();\nreturn $input.all().map((item, index) => {\n  const body = item.json || {};\n  const err = body.error && typeof body.error === 'object' ? body.error : {};\n  const http = String(err.httpCode || err.statusCode || body.statusCode || '');\n  let status = 'error';\n  if (http === '429' || body.error === 'rate_limited') status = 'rate_limited';\n  else if (http === '401') status = 'auth_error';\n  const retryAfter = Number(body.retry_after !== undefined ? body.retry_after : err.retryAfter);\n  const prior = (priorItems[index] && priorItems[index].json) || {};\n  let summary = 'the call failed';\n  if (status === 'rate_limited') summary = 'rate limited; the workflow stopped';\n  else if (status === 'auth_error') summary = 'the token was rejected';\n  return {\n    json: {\n      status,\n      retry_after: Number.isFinite(retryAfter) ? retryAfter : null,\n      summary,\n      reply_text: '',\n      request_id: body.request_id || prior.request_id || '',\n    },\n    pairedItem: { item: index },\n  };\n});\n"
+      }
+    },
+    {
+      "id": "7f36df1a-ab8b-ca7b-5bce-e17482c47908",
+      "name": "map wait error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        320
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const carried = $('carry').all();\nreturn $input.all().map((item, index) => {\n  const body = item.json || {};\n  const err = body.error && typeof body.error === 'object' ? body.error : {};\n  const http = String(err.httpCode || err.statusCode || body.statusCode || '');\n  const status = http === '429' || body.error === 'rate_limited' ? 'rate_limited' : 'error';\n  const retryAfter = Number(body.retry_after !== undefined ? body.retry_after : err.retryAfter);\n  const prior = (carried[index] && carried[index].json) || {};\n  const summary = status === 'rate_limited'\n    ? 'rate limited; the workflow stopped'\n    : 'the wait failed; resume by putting this request_id in input.request_id and executing again';\n  return {\n    json: {\n      status,\n      retry_after: Number.isFinite(retryAfter) ? retryAfter : null,\n      summary,\n      reply_text: '',\n      request_id: body.request_id || prior.request_id || '',\n    },\n    pairedItem: { item: index },\n  };\n});\n"
+      }
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "input": {
+      "main": [
+        [
+          {
+            "node": "has request_id?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "has request_id?": {
+      "main": [
+        [
+          {
+            "node": "carry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send": {
+      "main": [
+        [
+          {
+            "node": "unwrap send",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "map send error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "unwrap send": {
+      "main": [
+        [
+          {
+            "node": "after send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "after send": {
+      "main": [
+        [
+          {
+            "node": "pending after send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pending after send?": {
+      "main": [
+        [
+          {
+            "node": "carry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "carry": {
+      "main": [
+        [
+          {
+            "node": "wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wait": {
+      "main": [
+        [
+          {
+            "node": "unwrap wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "map wait error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "unwrap wait": {
+      "main": [
+        [
+          {
+            "node": "after wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "after wait": {
+      "main": [
+        [
+          {
+            "node": "retry wait?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "retry wait?": {
+      "main": [
+        [
+          {
+            "node": "carry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "map send error": {
+      "main": [
+        [
+          {
+            "node": "done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "map wait error": {
+      "main": [
+        [
+          {
+            "node": "done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "saveExecutionProgress": false
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
