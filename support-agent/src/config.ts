@@ -19,12 +19,6 @@ export const ENV_KEYS = [
   "LLM_MODEL",
   "LLM_PRICE_IN_PER_M",
   "LLM_PRICE_OUT_PER_M",
-  "OPENROUTER_API_KEY",
-  "OPENROUTER_API_KEY_FILE",
-  "FALLBACK_BASE_URL",
-  "FALLBACK_MODEL",
-  "FALLBACK_PRICE_IN_PER_M",
-  "FALLBACK_PRICE_OUT_PER_M",
   "LLM_TIMEOUT_MS",
   "SOURCE_URLS",
   "DOCS_DIRS",
@@ -75,12 +69,6 @@ export interface Config {
   llmModel: string
   llmPriceInPerM: number
   llmPriceOutPerM: number
-  openrouterApiKey?: string
-  fallbackBaseUrl: string
-  fallbackModel: string
-  fallbackPriceInPerM?: number
-  fallbackPriceOutPerM?: number
-  fallbackEnabled: boolean
   llmTimeoutMs: number
   sourceUrls: string[]
   docsDirs: string[]
@@ -149,9 +137,6 @@ export function loadConfig(env: Env, options: { requireSecrets?: boolean } = {})
   const escalationContact = optional(env, "ESCALATION_CONTACT")
   const linkRaw = optional(env, "ALLOWED_LINK_PREFIXES")
   const emailRaw = optional(env, "ALLOWED_EMAILS")
-  const fallbackKey = secret(env, "OPENROUTER_API_KEY")
-  const fallbackIn = optionalNumber(env, "FALLBACK_PRICE_IN_PER_M")
-  const fallbackOut = optionalNumber(env, "FALLBACK_PRICE_OUT_PER_M")
   const burst = burstOf(env)
   const policy = optional(env, "CONNECTION_POLICY") ?? "accept_capped"
   if (policy !== "accept_capped" && policy !== "manual") {
@@ -172,12 +157,6 @@ export function loadConfig(env: Env, options: { requireSecrets?: boolean } = {})
     llmModel: optional(env, "LLM_MODEL") ?? "deepseek-v4-pro",
     llmPriceInPerM: numberValue(env, "LLM_PRICE_IN_PER_M", 0.06),
     llmPriceOutPerM: numberValue(env, "LLM_PRICE_OUT_PER_M", 0.12),
-    openrouterApiKey: fallbackKey,
-    fallbackBaseUrl: optional(env, "FALLBACK_BASE_URL") ?? "https://openrouter.ai/api/v1",
-    fallbackModel: optional(env, "FALLBACK_MODEL") ?? "deepseek/deepseek-v4-pro",
-    fallbackPriceInPerM: fallbackIn,
-    fallbackPriceOutPerM: fallbackOut,
-    fallbackEnabled: Boolean(fallbackKey && fallbackIn !== undefined && fallbackOut !== undefined),
     llmTimeoutMs: numberValue(env, "LLM_TIMEOUT_MS", 45000),
     sourceUrls,
     docsDirs: csv(env, "DOCS_DIRS", ["./docs"]),
@@ -301,14 +280,6 @@ function boundedInt(env: Env, name: string, fallback: number, min: number, max: 
   if (!/^\d+$/.test(value)) throw new ConfigError(`${name} is invalid`)
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) throw new ConfigError(`${name} is invalid`)
-  return parsed
-}
-
-function optionalNumber(env: Env, name: string): number | undefined {
-  const value = optional(env, name)
-  if (!value) return undefined
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed < 0) throw new ConfigError(`${name} is invalid`)
   return parsed
 }
 

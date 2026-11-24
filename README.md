@@ -4,7 +4,7 @@ Worked examples for agents that use [p2a](https://p2a.sh). Each example installs
 
 | Example | What it does |
 |---|---|
-| [support-agent](support-agent/) | Answers questions about your own documents, refuses off-topic requests, routes account and billing questions to a human, and can file bug reports on Linear. Uses an OpenAI-compatible model: OpenCheap (`deepseek-v4-pro`) by default, OpenRouter as an alternative. |
+| [support-agent](support-agent/) | Answers questions about your own documents, refuses off-topic requests, routes account and billing questions to a human, and can file bug reports on Linear. Any OpenAI-compatible base URL works, for example OpenCheap or OpenRouter; the example uses OpenCheap (`deepseek-v4-pro`). |
 
 ```bash
 cd support-agent

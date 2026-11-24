@@ -178,11 +178,8 @@ export async function handleTurn(input: {
     return done(retryText(config), "error", 1)
   }
   input.state.budget.llmCalls += 1
-  const prices = completion.provider === "fallback"
-    ? { in: config.fallbackPriceInPerM ?? config.llmPriceInPerM, out: config.fallbackPriceOutPerM ?? config.llmPriceOutPerM }
-    : { in: config.llmPriceInPerM, out: config.llmPriceOutPerM }
   const actual = completion.usage
-    ? usageUsd(completion.usage.promptTokens, completion.usage.outputTokens, prices.in, prices.out)
+    ? usageUsd(completion.usage.promptTokens, completion.usage.outputTokens, config.llmPriceInPerM, config.llmPriceOutPerM)
     : reserved
   settle(input.state.budget, reserved, completion.errorCode ? reserved : actual, config.dailyBudgetUsd, input.now, (event) => {
     input.onEvent?.(event)
@@ -546,21 +543,16 @@ function assembledPrompt(config: Config, message: string, docs: { source: string
 
 async function ask(config: Config, messages: { role: "system" | "user" | "assistant"; content: string }[], fetchImpl?: typeof fetch): Promise<Completion> {
   if (!config.llmApiKey) return { text: "", provider: "primary", errorCode: "llm_failed" }
-  const primary = {
-    baseUrl: config.llmBaseUrl,
-    model: config.llmModel,
-    apiKey: config.llmApiKey,
-    timeoutMs: config.llmTimeoutMs,
-    maxOutputTokens: config.maxOutputTokens,
-  }
-  const fallback = config.fallbackEnabled && config.openrouterApiKey && config.fallbackPriceInPerM !== undefined && config.fallbackPriceOutPerM !== undefined
-    ? {
-        baseUrl: config.fallbackBaseUrl,
-        model: config.fallbackModel,
-        apiKey: config.openrouterApiKey,
-        timeoutMs: config.llmTimeoutMs,
-        maxOutputTokens: config.maxOutputTokens,
-      }
-    : undefined
-  return completeChat({ primary, fallback, messages, fetchImpl, logLevel: config.logLevel })
+  return completeChat({
+    primary: {
+      baseUrl: config.llmBaseUrl,
+      model: config.llmModel,
+      apiKey: config.llmApiKey,
+      timeoutMs: config.llmTimeoutMs,
+      maxOutputTokens: config.maxOutputTokens,
+    },
+    messages,
+    fetchImpl,
+    logLevel: config.logLevel,
+  })
 }

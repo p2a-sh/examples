@@ -100,33 +100,18 @@ describe("llm client", () => {
     expect(user).not.toContain("<note>")
   })
 
-  it("retries a 5xx once and uses the fallback only when its key and both prices are set", async () => {
-    expect(loadConfig({ OPENROUTER_API_KEY: "fallback-key" }).fallbackEnabled).toBe(false)
-    expect(loadConfig({ OPENROUTER_API_KEY: "fallback-key", FALLBACK_PRICE_IN_PER_M: "1" }).fallbackEnabled).toBe(false)
-    expect(loadConfig({
-      OPENROUTER_API_KEY: "fallback-key",
-      FALLBACK_PRICE_IN_PER_M: "1",
-      FALLBACK_PRICE_OUT_PER_M: "2",
-    }).fallbackEnabled).toBe(true)
-
+  it("retries a 5xx once on the configured provider", async () => {
     const urls: string[] = []
     const fetchImpl: typeof fetch = async (url) => {
       urls.push(String(url))
-      if (String(url).includes("primary.test")) return new Response("nope", { status: 500 })
-      return new Response(JSON.stringify(payload("fallback answer")), { status: 200 })
+      return new Response("nope", { status: 500 })
     }
     const primary: LlmRoute = { baseUrl: "https://primary.test/v1", model: "m", apiKey: "local-test-key", timeoutMs: 1000, maxOutputTokens: 8 }
-    const without = await completeChat({ primary, messages: [{ role: "user", content: "hi" }], fetchImpl, logLevel: "error" })
-    expect(without.errorCode).toBe("llm_failed")
+    const result = await completeChat({ primary, messages: [{ role: "user", content: "hi" }], fetchImpl, logLevel: "error" })
+    expect(result.errorCode).toBe("llm_failed")
+    expect(result.provider).toBe("primary")
     expect(urls).toHaveLength(2)
     expect(urls.every((url) => url.includes("primary.test"))).toBe(true)
-
-    urls.length = 0
-    const fallback: LlmRoute = { baseUrl: "https://fallback.test/v1", model: "m", apiKey: "fallback-key", timeoutMs: 1000, maxOutputTokens: 8 }
-    const withFallback = await completeChat({ primary, fallback, messages: [{ role: "user", content: "hi" }], fetchImpl, logLevel: "error" })
-    expect(withFallback.provider).toBe("fallback")
-    expect(withFallback.text).toBe("fallback answer")
-    expect(urls.map((url) => url.includes("fallback.test"))).toEqual([false, false, true])
   })
 
   it("counts reasoning tokens as completion tokens", async () => {

@@ -51,7 +51,7 @@ describe("config", () => {
     }
   })
 
-  it("uses defaults and turns the fallback on only when the key and both prices are set", () => {
+  it("uses defaults and accepts the OpenCheap key alias", () => {
     const config = loadConfig({})
     expect(config.productName).toBe("p2a")
     expect(config.dailyBudgetUsd).toBe(2)
@@ -66,13 +66,9 @@ describe("config", () => {
     expect(() => loadConfig({ CLARIFY_TTL_HOURS: "0" })).toThrow(/CLARIFY_TTL_HOURS/)
     expect(() => loadConfig({ CLARIFY_TTL_HOURS: "169" })).toThrow(/CLARIFY_TTL_HOURS/)
     expect(config.llmBaseUrl).toBe("https://api.opencheap.si/v1")
-    expect(config.fallbackEnabled).toBe(false)
-    expect(loadConfig({ OPENROUTER_API_KEY: "present", FALLBACK_PRICE_IN_PER_M: "1" }).fallbackEnabled).toBe(false)
-    expect(loadConfig({
-      OPENROUTER_API_KEY: "present",
-      FALLBACK_PRICE_IN_PER_M: "1",
-      FALLBACK_PRICE_OUT_PER_M: "2",
-    }).fallbackEnabled).toBe(true)
+    expect(config.llmModel).toBe("deepseek-v4-pro")
+    expect(loadConfig({ LLM_BASE_URL: "https://api.example.test/v1", LLM_MODEL: "other-model" }).llmBaseUrl).toBe("https://api.example.test/v1")
+    expect(loadConfig({ LLM_BASE_URL: "https://api.example.test/v1", LLM_MODEL: "other-model" }).llmModel).toBe("other-model")
     expect(loadConfig({ OPENCHEAP_API_KEY: "alias-key" }).llmApiKey).toBe("alias-key")
     expect(() => loadConfig({ DAILY_BUDGET_USD: "nope" })).toThrow(/DAILY_BUDGET_USD/)
   })

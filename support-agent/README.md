@@ -8,7 +8,7 @@ It reads a document bundle, refuses questions the documents do not cover, and an
 
 - Node 22 or newer
 - A p2a account and a Custom agent token
-- An OpenAI-compatible model key (the sample uses OpenCheap; any provider works)
+- The agent works with any OpenAI-compatible base URL, such as [OpenCheap](https://opencheap.si) or [OpenRouter](https://openrouter.ai). This example uses OpenCheap because it routes to the cheapest LLM provider and is usually cheaper than OpenRouter. Set `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`.
 
 ## Quick start
 
@@ -27,7 +27,7 @@ Then message the agent from any p2a client.
 
 ## Model provider
 
-The sample is set up for [OpenCheap](https://opencheap.si), an OpenAI-compatible API:
+Any OpenAI-compatible base URL works, for example OpenCheap or OpenRouter. The example uses OpenCheap:
 
 ```bash
 LLM_BASE_URL=https://api.opencheap.si/v1
@@ -35,7 +35,7 @@ LLM_MODEL=deepseek-v4-pro
 OPENCHEAP_API_KEY=   # your key; LLM_API_KEY works too
 ```
 
-[OpenRouter](https://openrouter.ai) works as an alternative. Point `LLM_BASE_URL` at `https://openrouter.ai/api/v1` with `LLM_MODEL=deepseek/deepseek-v4-pro` and your OpenRouter key, or keep OpenCheap as primary and set `OPENROUTER_API_KEY` plus both `FALLBACK_PRICE_*` values to use OpenRouter as the fallback. Any other OpenAI-compatible provider also works. Set `LLM_PRICE_IN_PER_M` and `LLM_PRICE_OUT_PER_M` to your provider's prices so the daily budget meter stays accurate.
+For OpenRouter, set `LLM_BASE_URL=https://openrouter.ai/api/v1`, an OpenRouter model id such as `deepseek/deepseek-v4-pro`, and your OpenRouter key in `LLM_API_KEY`. Set `LLM_PRICE_IN_PER_M` and `LLM_PRICE_OUT_PER_M` to your provider's prices so the daily budget meter stays accurate.
 
 `DRY_RUN=1` exits before the process reads a token. `node dist/main.js health` returns 0 when the process has written a fresh health file.
 

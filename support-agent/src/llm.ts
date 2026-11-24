@@ -13,7 +13,7 @@ export interface TokenUsage {
 export interface Completion {
   text: string
   usage?: TokenUsage
-  provider: "primary" | "fallback"
+  provider: "primary"
   finishReason?: string
   errorCode?: "llm_failed" | "llm_timeout"
 }
@@ -28,7 +28,6 @@ export interface LlmRoute {
 
 export async function completeChat(options: {
   primary: LlmRoute
-  fallback?: LlmRoute
   messages: ChatMessage[]
   fetchImpl?: typeof fetch
   logLevel?: LogLevel
@@ -36,10 +35,7 @@ export async function completeChat(options: {
   const fetchImpl = options.fetchImpl ?? fetch
   const primary = await attempt(options.primary, options.messages, fetchImpl, options.logLevel ?? "info")
   if (!primary.errorCode) return { ...primary, provider: "primary" }
-  if (!options.fallback) return { text: "", provider: "primary", errorCode: primary.errorCode }
-  const fallback = await attempt(options.fallback, options.messages, fetchImpl, options.logLevel ?? "info", 1)
-  if (!fallback.errorCode) return { ...fallback, provider: "fallback" }
-  return { text: "", provider: "fallback", errorCode: fallback.errorCode }
+  return { text: "", provider: "primary", errorCode: primary.errorCode }
 }
 
 async function attempt(
