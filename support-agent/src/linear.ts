@@ -254,7 +254,7 @@ export async function judgeWithModel(
       model: config.llmModel,
       apiKey: config.llmApiKey,
       timeoutMs: config.llmTimeoutMs,
-      maxOutputTokens: 60,
+      maxOutputTokens: 1500,
     },
     messages: [
       {

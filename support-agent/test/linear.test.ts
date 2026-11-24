@@ -435,7 +435,7 @@ describe("judge", () => {
     const fetchImpl = (content: string, status = 200): typeof fetch => async (_url, init) => {
       const body = JSON.parse(String(init?.body ?? "{}")) as { temperature?: number; max_tokens?: number; tools?: unknown }
       expect(body.temperature).toBe(0.2)
-      expect(body.max_tokens).toBe(60)
+      expect(body.max_tokens).toBe(1500)
       expect(body.tools).toBeUndefined()
       return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content } }] }), { status })
     }

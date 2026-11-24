@@ -341,6 +341,34 @@ describe("request guards", () => {
     expect([...state.buckets.bursts.keys()].join(" ")).not.toContain("example.com")
   })
 
+  it("gives each relayed conversation on the ownerless gateway DID its own buckets", async () => {
+    const stateDir = folder()
+    const { calls, fetchImpl } = recordingFetch("See the guide.")
+    const cfg = config(stateDir, { SENDER_BURST: "1/600s" })
+    const state = emptyTurnState(NOW)
+    const gateway = "did:aw:gateway"
+    const send = (contextId: string) => handleTurn({
+      config: cfg,
+      state,
+      message: "how does p2a work",
+      did: gateway,
+      senderDid: gateway,
+      owner: gateway,
+      contextId,
+      now: NOW,
+      fetchImpl,
+    })
+    expect((await send("conv-a")).reason).toBe("answer")
+    expect((await send("conv-b")).reason).toBe("answer")
+    expect((await send("conv-a")).reason).toBe("limited")
+    expect(calls).toHaveLength(2)
+    expect([...state.buckets.bursts.keys()].sort()).toEqual(["did:did:aw:gateway#conv-a", "did:did:aw:gateway#conv-b"])
+    expect([...state.buckets.daily.keys()].filter((key) => key.startsWith("owner:")).sort()).toEqual([
+      "owner:did:aw:gateway#conv-a",
+      "owner:did:aw:gateway#conv-b",
+    ])
+  })
+
   it("pauses at the budget cap and resets at 00:00 UTC", async () => {
     const stateDir = folder()
     const events: string[] = []

@@ -24,7 +24,7 @@ export const CLARIFY_SYSTEM = [
   "The question asks for at most 2 missing fields, is at most 300 characters, and has no links and no personal data.",
 ].join(" ")
 
-const CLARIFY_TOKENS = 200
+const CLARIFY_TOKENS = 1500
 const HOW_TO = /\bhow (do|can|to)\b/i
 const GIVES_UP = /\b(don'?t know|no idea|skip|that'?s all)\b/i
 const SURFACE = /\b(page|tab|tool|screen|endpoint|dashboard|settings|button|menu|form|panel|dialog|api)\b/i

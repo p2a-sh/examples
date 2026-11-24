@@ -125,9 +125,12 @@ export async function handleTurn(input: {
   if (ownerBlocked(config.stateDir, input.owner)) {
     return done(blockedText(config), "blocked")
   }
+  // A sender with no owner is the shared relay DID, so each relayed conversation gets its own buckets.
+  const relayed = input.owner === input.did && input.contextId !== input.did
+  const bucket = relayed ? `${input.did}#${input.contextId}` : undefined
   const limit = takeLimit(input.state.buckets, {
-    did: input.did,
-    owner: input.owner.toLowerCase(),
+    did: bucket ?? input.did,
+    owner: (bucket ?? input.owner).toLowerCase(),
     contextId: input.contextId,
     now: input.now,
     burst: config.senderBurst,
@@ -212,6 +215,7 @@ type BugInput = {
   did: string
   senderDid?: string
   requestId?: string
+  contextId?: string
   now: Date
   fetchImpl?: typeof fetch
   onEvent?: (event: string) => void
@@ -223,7 +227,8 @@ async function maybeFileBug(input: BugInput): Promise<TurnResult | null> {
   if (!input.config.linearEnabled) return null
   if (!input.senderDid) return legacyFileBug(input)
   if (isHowToQuestion(input.message)) return null
-  const key = senderKey(input.senderDid)
+  // Relayed senders share the gateway DID, so the conversation keeps their reports apart.
+  const key = senderKey(reporterOf(input))
   return withKey(key, () => clarifyLocked(input, key))
 }
 
@@ -297,7 +302,7 @@ async function advanceReport(input: BugInput, key: string, existing: PendingRepo
   }
   const needsInfo = !canFile
   const filed = await runFile(input, {
-    did: input.senderDid || input.did,
+    did: reporterOf(input),
     summary: facts[0] ?? "",
     facts,
     missing: judgment.missing,
@@ -372,6 +377,11 @@ async function runFile(input: BugInput, report: {
     const turn = done(linearFailedText(config), "error")
     return { result: { text: turn.text, action: "failed", judged: false }, turn }
   }
+}
+
+function reporterOf(input: BugInput): string {
+  const did = input.senderDid || input.did
+  return input.contextId && input.contextId !== did ? `${did}\n${input.contextId}` : did
 }
 
 function modelAllowed(input: BugInput): boolean {

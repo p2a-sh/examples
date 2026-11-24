@@ -53,7 +53,7 @@ function model(): { fetchImpl: typeof fetch; bodies: string[] } {
     const system = parsed.messages?.find((item) => item.role === "system")?.content ?? ""
     const user = parsed.messages?.find((item) => item.role === "user")?.content ?? ""
     if (system.includes("enough detail")) {
-      if (parsed.max_tokens !== 200) throw new Error("clarify tokens")
+      if (parsed.max_tokens !== 1500) throw new Error("clarify tokens")
       const ready = user.includes("error 418") && user.includes("should")
       const content = ready
         ? JSON.stringify({
@@ -68,7 +68,7 @@ function model(): { fetchImpl: typeof fetch; bodies: string[] } {
           })
       return chat(content)
     }
-    if (parsed.max_tokens !== 60) throw new Error("judge tokens")
+    if (parsed.max_tokens !== 1500) throw new Error("judge tokens")
     return chat(JSON.stringify({ identifier: user.includes(BETA) ? "SUP-2" : null }))
   }
   return { fetchImpl, bodies }
@@ -195,6 +195,33 @@ describe("clarify config and rubric", () => {
 })
 
 describe("clarifying a report", () => {
+  it("keeps two relayed conversations apart when they share the gateway DID", async () => {
+    const dir = folder()
+    const cfg = config(dir)
+    const { fetchImpl } = model()
+    const { client, calls } = tracker()
+    const gateway = "did:example:gateway"
+    const send = (contextId: string, message: string, requestId: string) => handleTurn({
+      config: cfg,
+      state: emptyTurnState(NOW),
+      message,
+      did: gateway,
+      senderDid: gateway,
+      requestId,
+      owner: "owner",
+      contextId,
+      now: NOW,
+      linear: client,
+      fetchImpl,
+    })
+    await send("ctx-one", `the p2a sdk is broken ${ALPHA}`, "req-gw-1")
+    await send("ctx-two", `the p2a sdk is broken ${BETA}`, "req-gw-2")
+    const entries = pending(dir).entries
+    expect(entries).toHaveLength(2)
+    expect(entries.find((entry) => entry.facts.join(" ").includes(ALPHA))?.facts.join(" ")).not.toContain(BETA)
+    expect(calls.filter((call) => call.op === "create")).toEqual([])
+  })
+
   it("keeps two senders apart, replays a question, and files needs-info at the round cap", async () => {
     const dir = folder()
     const cfg = config(dir)
