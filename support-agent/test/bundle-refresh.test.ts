@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, utimesSync } from "node:fs"
+import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { bundleRefreshLoop, ensureBundle, refreshBundle } from "../src/bundle-refresh.js"
+import { BUNDLE_REJECT_RETRY_MS, bundleRefreshLoop, ensureBundle, refreshBundle } from "../src/bundle-refresh.js"
 import type { BuildResult } from "../src/bundle.js"
 import { loadConfig } from "../src/config.js"
 
@@ -69,9 +69,44 @@ describe("bundle refresh", () => {
     expect(JSON.parse(readFileSync(join(dir, "bundle.json"), "utf8")).version).toBe("second")
     const logged = lines.join("\n")
     expect(logged).toContain("bundle_build_failed")
+    expect(logged).toContain("bundle_kept_previous")
     expect(logged).toContain("bundle_rejected")
+    expect(logged).not.toContain("bundle_rejected_no_previous")
     expect(logged).not.toContain(SECRET)
     expect(logged).not.toContain("rejected-new")
+
+    const empty = mkdtempSync(join(tmpdir(), "bundle-empty-"))
+    const emptyConfig = loadConfig({
+      STATE_DIR: empty,
+      DOCS_DIRS: empty,
+      SOURCE_URLS: "",
+      LOG_LEVEL: "info",
+    })
+    const emptyLines: string[] = []
+    let alerted = 0
+    const leaked = ["wh", "sec_", "A".repeat(16)].join("")
+    const keptEmpty = await refreshBundle(emptyConfig, {
+      writeLog: (line) => emptyLines.push(line),
+      onRejected: async () => {
+        alerted += 1
+      },
+      build: async () => ({
+        ...built("nope"),
+        bundle: null,
+        rejected: true,
+        paused: true,
+        alert: true,
+        rejectedPath: "sdk/typescript/src/wake.ts",
+        warnings: [{ file: "sdk/typescript/src/wake.ts" }],
+      }),
+    })
+    expect(keptEmpty).toBe("kept")
+    expect(alerted).toBe(1)
+    const emptyLog = emptyLines.join("\n")
+    expect(emptyLog).toContain("bundle_rejected_no_previous")
+    expect(emptyLog).toContain("sdk/typescript/src/wake.ts")
+    expect(emptyLog).not.toContain(leaked)
+    expect(emptyLog).not.toContain("bundle_kept_previous")
 
     const controller = new AbortController()
     const delays: number[] = []
@@ -88,5 +123,31 @@ describe("bundle refresh", () => {
     expect(delays[0]).toBeGreaterThan(23 * 60 * 60 * 1000)
     expect(delays[0]).toBeLessThanOrEqual(24 * 60 * 60 * 1000)
     expect(JSON.parse(readFileSync(join(dir, "bundle.json"), "utf8")).version).toBe("third")
+  })
+
+  it("retries a stale rejected bundle in minutes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bundle-refresh-"))
+    writeFileSync(join(dir, "bundle.json"), JSON.stringify(built("old").bundle))
+    const old = new Date("2020-01-01T00:00:00Z")
+    utimesSync(join(dir, "bundle.json"), old, old)
+    const config = loadConfig({
+      STATE_DIR: dir,
+      DOCS_DIRS: dir,
+      SOURCE_URLS: "",
+      BUNDLE_REFRESH_HOURS: "24",
+      LOG_LEVEL: "error",
+    })
+    const controller = new AbortController()
+    const delays: number[] = []
+    await bundleRefreshLoop(config, controller.signal, {
+      sleep: async (ms) => {
+        delays.push(ms)
+      },
+      build: async () => {
+        controller.abort()
+        return { ...built("nope"), bundle: null, rejected: true, paused: true, alert: true, warnings: [] }
+      },
+    })
+    expect(delays).toEqual([BUNDLE_REJECT_RETRY_MS])
   })
 })

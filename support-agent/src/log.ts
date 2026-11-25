@@ -8,6 +8,9 @@ export const LOG_FIELDS = [
   "category",
   "duration_ms",
   "skipped",
+  "file",
+  "clarified",
+  "kind",
 ] as const
 
 const FIELDS = new Set<string>(LOG_FIELDS)

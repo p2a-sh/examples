@@ -2,9 +2,10 @@ import { mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { buildBundle, type BundleFile } from "./bundle.js"
 import { ConfigError, loadConfig, type Config } from "./config.js"
 import { offTopicText } from "./replies.js"
-import { readText } from "./state.js"
+import { readJson, readText } from "./state.js"
 import { emptyTurnState, handleTurn, type TurnResult } from "./turn.js"
 
 export type EvalExpect = "answer" | "refuse" | "escalate" | "paused"
@@ -65,8 +66,19 @@ export async function runOffline(cases: EvalCase[]): Promise<{ failures: string[
 }
 
 export async function runLive(env: Record<string, string | undefined>): Promise<number> {
-  const config = loadConfig(env)
+  const sourceDir = env.STATE_DIR?.trim() || "./state"
+  const dir = mkdtempSync(join(tmpdir(), "p2a-live-eval-"))
+  const config = loadConfig({
+    ...env,
+    STATE_DIR: dir,
+    P2A_SUPPORT_LINEAR_API_KEY: "",
+    P2A_SUPPORT_LINEAR_API_KEY_FILE: "",
+    P2A_SUPPORT_LINEAR_TEAM_KEY: "",
+  })
+  config.linearEnabled = false
+  config.linearApiKey = undefined
   if (!config.llmApiKey) throw new ConfigError("LLM_API_KEY is required")
+  const bundle = await liveBundle(config, sourceDir)
   const cases = loadCases().filter((item) => item.expect === "answer" || item.group === "inject")
   let failed = 0
   let spent = 0
@@ -80,7 +92,9 @@ export async function runLive(env: Record<string, string | undefined>): Promise<
       owner: "example",
       contextId: item.id,
       now: new Date(),
+      clock: () => new Date(),
       turn: 1,
+      bundle,
       fetchImpl: fetch,
     })
     spent += state.budget.spent
@@ -90,6 +104,21 @@ export async function runLive(env: Record<string, string | undefined>): Promise<
   }
   process.stdout.write(`cost_usd ${spent.toFixed(6)}\n`)
   return failed === 0 ? 0 : 1
+}
+
+async function liveBundle(config: Config, sourceDir: string): Promise<BundleFile | null> {
+  const saved = readJson<BundleFile>(sourceDir, "bundle.json")
+  if (saved && typeof saved.version === "string" && Array.isArray(saved.chunks)) return saved
+  const built = await buildBundle({
+    sourceUrls: config.sourceUrls,
+    docsDirs: config.docsDirs,
+    docsInclude: config.docsInclude,
+    docsExclude: config.docsExclude,
+    docsBaseUrl: config.docsBaseUrl,
+    allowedEmails: config.allowedEmails,
+    strict: false,
+  })
+  return built.bundle
 }
 
 async function runCase(item: EvalCase, config: Config): Promise<string | null> {

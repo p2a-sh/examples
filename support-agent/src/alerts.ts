@@ -1,11 +1,12 @@
 import { readText, writeJsonAtomic } from "./state.js"
-import { utcDay } from "./limits.js"
+import { dayMovedForward, utcDay } from "./limits.js"
 import { logLine, type LogLevel } from "./log.js"
 
 export interface AlertState {
   day: string
   sent: number
   summarized: boolean
+  suppressed: number
 }
 
 export interface AlertInfo {
@@ -15,7 +16,7 @@ export interface AlertInfo {
 }
 
 export function emptyAlerts(now: Date): AlertState {
-  return { day: utcDay(now), sent: 0, summarized: false }
+  return { day: utcDay(now), sent: 0, summarized: false, suppressed: 0 }
 }
 
 export function loadAlerts(dir: string, now: Date): AlertState {
@@ -29,6 +30,7 @@ export function loadAlerts(dir: string, now: Date): AlertState {
       day: fresh.day,
       sent: typeof saved.sent === "number" ? saved.sent : 0,
       summarized: saved.summarized === true,
+      suppressed: typeof saved.suppressed === "number" ? saved.suppressed : 0,
     }
   } catch {
     return fresh
@@ -57,21 +59,26 @@ export async function dispatchAlert(input: {
   logLevel: LogLevel
   send: (to: string, text: string) => Promise<void>
 }): Promise<void> {
-  const day = utcDay(input.now)
-  if (input.state.day !== day) {
-    input.state.day = day
+  if (dayMovedForward(input.state.day, input.now)) {
+    input.state.day = utcDay(input.now)
     input.state.sent = 0
     input.state.summarized = false
+    input.state.suppressed = 0
   }
   const summary = input.state.sent >= input.alertsPerDay
-  if (summary && input.state.summarized) return
+  if (summary && input.state.summarized) {
+    input.state.suppressed += 1
+    return
+  }
   const info = summary ? { kind: "summary" as const } : input.info
-  if (summary) input.state.summarized = true
-  else input.state.sent += 1
   const text = alertText(info)
   if (!input.alertTo) {
+    if (summary) input.state.summarized = true
+    else input.state.sent += 1
     logLine("warn", "alert", { category: info.category ?? info.kind, count: input.state.sent }, input.logLevel)
     return
   }
   await input.send(input.alertTo, text)
+  if (summary) input.state.summarized = true
+  else input.state.sent += 1
 }

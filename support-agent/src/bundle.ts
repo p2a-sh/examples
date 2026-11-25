@@ -47,6 +47,8 @@ export interface BuildResult {
   alert: boolean
   warnings: BuildWarning[]
   dropped: number
+  /** Relative path of the first leak. Never the matched text. */
+  rejectedPath?: string
 }
 
 export interface BuildRequest {
@@ -94,7 +96,7 @@ export async function buildBundle(request: BuildRequest): Promise<BuildResult> {
         warnings.push({ file: file.rel })
         continue
       }
-      if (looksLikeHtml(file.rel, text)) text = htmlToText(text)
+      if (isHtmlName(file.rel)) text = htmlToText(text)
       loadedSources.push({ source: file.rel, sha256: sha256(text), text, reuseChunks: false })
     }
   }
@@ -102,26 +104,37 @@ export async function buildBundle(request: BuildRequest): Promise<BuildResult> {
   const chunks: BundleChunk[] = []
   let dropped = 0
   let leak = false
+  let rejectedPath: string | undefined
   for (const source of loadedSources) {
-    if (!source.reuseChunks && source.text && leakKind(source.text, allowedEmails)) {
+    const sourceLeak = !source.reuseChunks && Boolean(source.text) && leakKind(source.text, allowedEmails) !== null
+    if (sourceLeak && strict) {
       leak = true
       dropped += 1
+      rejectedPath ??= source.source
       warnings.push({ file: source.source })
-      if (strict) break
-      continue
+      break
     }
     const pieces = source.reuseChunks
       ? (previous?.chunks.filter((chunk) => chunk.source === source.source) ?? [])
       : chunkSource(source, request.docsBaseUrl)
+    const before = chunks.length
+    let droppedPiece = false
     for (const piece of pieces) {
       if (leakKind(piece.text, allowedEmails)) {
         leak = true
         dropped += 1
+        droppedPiece = true
+        rejectedPath ??= source.source
         warnings.push({ file: source.source })
         if (strict) break
         continue
       }
       chunks.push(piece)
+    }
+    if (!strict && sourceLeak && !droppedPiece) {
+      chunks.length = before
+      dropped += 1
+      warnings.push({ file: source.source })
     }
     if (strict && leak) break
   }
@@ -134,6 +147,7 @@ export async function buildBundle(request: BuildRequest): Promise<BuildResult> {
       alert: true,
       warnings,
       dropped,
+      rejectedPath,
     }
   }
 
@@ -179,7 +193,7 @@ async function loadUrl(
   if (bytes.byteLength > MAX_BYTES) return reuse(url, prior, previous)
   let text = new TextDecoder().decode(bytes)
   const type = response.headers.get("content-type") ?? ""
-  if (looksLikeHtml(url, text) || type.includes("html")) text = htmlToText(text)
+  if (type.toLowerCase().includes("html")) text = htmlToText(text)
   const etag = response.headers.get("etag") ?? undefined
   return { source: url, sha256: sha256(text), etag, text, reuseChunks: false }
 }
@@ -354,8 +368,9 @@ function windowText(text: string): string[] {
   return parts
 }
 
-function looksLikeHtml(name: string, text: string): boolean {
-  return /\.html?$/i.test(name) || /<(?:html|body|p|div|nav|footer)\b/i.test(text)
+function isHtmlName(name: string): boolean {
+  const path = name.split(/[?#]/)[0] ?? ""
+  return /\.html?$/i.test(path)
 }
 
 export function htmlToText(html: string): string {

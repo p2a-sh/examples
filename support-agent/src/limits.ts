@@ -11,6 +11,14 @@ export function utcDay(now: Date): string {
   return now.toISOString().slice(0, 10)
 }
 
+/** True when `now` is a later UTC day than `previous`, or `previous` is not a day stamp. */
+export function dayMovedForward(previous: string, now: Date): boolean {
+  const day = utcDay(now)
+  if (day === previous) return false
+  if (/^\d{4}-\d{2}-\d{2}$/.test(previous) && day < previous) return false
+  return true
+}
+
 export interface LimitDecision {
   ok: boolean
   scope?: "burst" | "sender_day" | "owner_day" | "context_day"
@@ -47,7 +55,7 @@ export function takeLimit(
   const dailyChecks: { key: string; limit: number; scope: LimitDecision["scope"]; unit: string }[] = [
     { key: `sender:${input.did}`, limit: input.senderPerDay, scope: "sender_day", unit: "day" },
     { key: `owner:${input.owner}`, limit: input.ownerPerDay, scope: "owner_day", unit: "day" },
-    { key: `context:${input.contextId}`, limit: input.contextPerDay, scope: "context_day", unit: "day" },
+    { key: contextKey(input.did, input.contextId), limit: input.contextPerDay, scope: "context_day", unit: "day" },
   ]
   for (const check of dailyChecks) {
     const current = buckets.daily.get(check.key)
@@ -64,6 +72,11 @@ export function takeLimit(
     buckets.daily.set(check.key, { day, count: count + 1 })
   }
   return { ok: true }
+}
+
+function contextKey(did: string, contextId: string): string {
+  const key = `context:${did}:${contextId}`
+  return key.length <= 200 ? key : key.slice(0, 200)
 }
 
 function minutesUntilUtcDay(now: Date): number {

@@ -23,4 +23,21 @@ describe("health heartbeat", () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("does not refresh health while a listen retry is unresolved", () => {
+    vi.useFakeTimers()
+    const dir = mkdtempSync(join(tmpdir(), "hb-"))
+    try {
+      const gate = { quietUntil: Date.now() + 90_000 }
+      const stop = startHeartbeat(dir, () => new Date(), 30_000, gate)
+      vi.advanceTimersByTime(30_000)
+      expect(existsSync(join(dir, "health.json"))).toBe(false)
+      gate.quietUntil = 0
+      vi.advanceTimersByTime(30_000)
+      expect(healthFresh(dir)).toBe(true)
+      stop()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

@@ -47,7 +47,11 @@ export async function upsertPending(dir: string, now: Date, ttlMs: number, logLe
   await withKey(PENDING_LOCK, async () => {
     const entries = loadPending(dir, now, ttlMs, logLevel).filter((item) => item.key !== entry.key)
     entries.push(entry)
-    writePending(dir, entries.length > PENDING_CAP ? entries.slice(entries.length - PENDING_CAP) : entries)
+    if (entries.length > PENDING_CAP) {
+      logLine("warn", "pending_evicted", { count: entries.length - PENDING_CAP }, logLevel)
+      entries.splice(0, entries.length - PENDING_CAP)
+    }
+    writePending(dir, entries)
   })
 }
 

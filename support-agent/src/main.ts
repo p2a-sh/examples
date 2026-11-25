@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs"
 import { pathToFileURL } from "node:url"
+import { logBundleRejection, logFile } from "./bundle-refresh.js"
 import { buildBundle, type BundleFile } from "./bundle.js"
 import { ConfigError, loadConfig } from "./config.js"
 import { runLive } from "./eval.js"
@@ -49,17 +50,12 @@ async function buildBundleCommand(argv: string[], env: Record<string, string | u
     strict: config.bundleStrict,
     previous,
   })
-  if (result.rejected && !result.bundle) {
-    logLine("error", "bundle_rejected", { error_code: "bundle_rejected" }, config.logLevel)
+  if (result.rejected || !result.bundle) {
+    logBundleRejection(config.logLevel, result.bundle != null, logFile(result.rejectedPath))
     return 1
   }
-  if (!result.bundle) return 1
   if (out) writeFileSync(out, JSON.stringify(result.bundle))
   else writeJsonAtomic(config.stateDir, "bundle.json", result.bundle)
-  if (result.rejected) {
-    logLine("warn", "bundle_kept_previous", { error_code: "bundle_rejected" }, config.logLevel)
-    return 1
-  }
   for (const warning of result.warnings) {
     logLine("warn", "bundle_chunk_dropped", { skipped: warning.file }, config.logLevel)
   }

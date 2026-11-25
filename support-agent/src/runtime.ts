@@ -1,10 +1,8 @@
-import { readJson } from "./state.js"
-import type { BundleFile } from "./bundle.js"
 import { bundleRefreshLoop, ensureBundle } from "./bundle-refresh.js"
 import { dispatchAlert, loadAlerts, saveAlerts, type AlertInfo, type AlertState } from "./alerts.js"
 import { decideConnection, loadConnections, saveConnections, type ConnectionState } from "./connections.js"
 import { ConfigError, loadConfig, type Config } from "./config.js"
-import { startHeartbeat, touchHealth } from "./health.js"
+import { HEALTH_INTERVAL_MS, HEALTH_QUIET_MS, startHeartbeat, touchHealth, type HealthGate } from "./health.js"
 import { logLine } from "./log.js"
 import { handleTurn, loadTurnState, type TurnState } from "./turn.js"
 
@@ -42,7 +40,9 @@ const OWNER_TTL_MS = 60 * 60 * 1000
 export const LISTEN_BACKOFF_MS = 1_000
 export const LISTEN_BACKOFF_MAX_MS = 30_000
 
-const TRANSIENT_HTTP = new Set([408, 429, 502, 503, 504])
+const TRANSIENT_HTTP = new Set([408, 425, 429])
+// Shared by the listen logger, the heartbeat, and request handling. A poll retry holds it so a stuck reconnect is not reported as healthy.
+const healthGate: HealthGate = { quietUntil: 0 }
 const CONNECTION_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",
@@ -108,11 +108,13 @@ function transientListenCode(err: unknown): string | undefined {
   if (err instanceof ConfigError) return undefined
   const status = numberField(err, "status")
   if (status === 401 || status === 403) return undefined
-  if (status !== undefined && TRANSIENT_HTTP.has(status)) return status === 429 ? "rate_limited" : `http_${status}`
+  if (status === 429 || (status !== undefined && (TRANSIENT_HTTP.has(status) || status >= 500))) {
+    return status === 429 ? "rate_limited" : `http_${status}`
+  }
   const code = stringField(err, "code")
   if (code === "unauthorized" || code === "forbidden") return undefined
   if (code === "rate_limited") return "rate_limited"
-  if (code === "network") return "network"
+  if (code === "network" || code === "invalid_response" || code === "rpc_error") return code
   const cause = err && typeof err === "object" ? (err as { cause?: unknown }).cause : undefined
   const causeCode = stringField(cause, "code")
   if (CONNECTION_CODES.has(code) || CONNECTION_CODES.has(causeCode)) {
@@ -138,8 +140,15 @@ function stringField(err: unknown, key: string): string {
 }
 
 function pollWarnCode(line: string): string {
-  const match = /^poll_retry (http_(?:408|502|503|504)|network|timeout|connection|rate_limited)$/.exec(line)
-  return match?.[1] ?? "poll_retry"
+  const match = /^poll_retry (http_\d{3}|network|timeout|connection|rate_limited|invalid_response|rpc_error)$/.exec(line)
+  const code = match?.[1]
+  if (!code) return "poll_retry"
+  if (code.startsWith("http_")) {
+    const status = Number(code.slice(5))
+    if (status === 401 || status === 403) return "poll_retry"
+    if (!(status === 408 || status === 425 || status === 429 || status >= 500)) return "poll_retry"
+  }
+  return code
 }
 
 export async function runSupport(env: Record<string, string | undefined>, deps?: Partial<RuntimeDeps> & { signal?: AbortSignal }): Promise<void> {
@@ -152,13 +161,37 @@ export async function runSupport(env: Record<string, string | undefined>, deps?:
     process.once("SIGTERM", stop)
     process.once("SIGINT", stop)
   }
-  const mode = env.P2A_LISTEN_MODE === "poll" ? "poll" : "stream"
+  const mode = config.listenMode
   const now = deps?.now ?? (() => new Date())
-  const turn = loadTurnState(config.stateDir, now())
+  const turn = loadTurnState(config.stateDir, now(), config.senderBurstWindowSeconds * 1000)
+  const pendingAlerts: AlertInfo[] = []
+  let deliverAlert: ((info: AlertInfo) => Promise<void>) | undefined
+  const pushAlert = async (info: AlertInfo): Promise<void> => {
+    if (!deliverAlert) {
+      pendingAlerts.push(info)
+      return
+    }
+    await deliverAlert(info)
+  }
+  const bindAlerts = (alerts: AlertState, agent: SupportAgent) => {
+    deliverAlert = (info) => raise(config, alerts, now(), agent, info)
+  }
+  const flushAlerts = async () => {
+    if (!deliverAlert) return
+    const queued = pendingAlerts.splice(0)
+    for (const info of queued) await deliverAlert(info)
+  }
+  const bundleHooks = {
+    fetchImpl: deps?.fetchImpl,
+    now,
+    onRejected: () => pushAlert({ kind: "bundle_rejected" }),
+  }
   const listenOnce = async (agent: SupportAgent) => {
     const wired = await wireSupport(config, { agent, fetchImpl: deps?.fetchImpl, now, turn })
+    bindAlerts(wired.alerts, agent)
+    await flushAlerts()
     touchHealth(config.stateDir, now())
-    const stopHeartbeat = startHeartbeat(config.stateDir, now)
+    const stopHeartbeat = startHeartbeat(config.stateDir, now, HEALTH_INTERVAL_MS, healthGate)
     try {
       await agent.listen({ mode, signal })
     } finally {
@@ -168,17 +201,23 @@ export async function runSupport(env: Record<string, string | undefined>, deps?:
       touchHealth(config.stateDir, now())
     }
   }
+  const onRejection = (reason: unknown) => {
+    logLine("error", "unhandled_rejection", { error_code: rejectionCode(reason) }, config.logLevel)
+  }
+  process.on("unhandledRejection", onRejection)
   try {
-    await ensureBundle(config, { fetchImpl: deps?.fetchImpl, now })
-    void bundleRefreshLoop(config, signal, { fetchImpl: deps?.fetchImpl, now }).catch(() => {
+    await ensureBundle(config, bundleHooks)
+    void bundleRefreshLoop(config, signal, bundleHooks).catch(() => {
       logLine("warn", "bundle_refresh", { error_code: "bundle_build_failed" }, config.logLevel)
     })
     if (deps?.agent) {
       const agent = deps.agent
       const wired = await wireSupport(config, { agent, fetchImpl: deps.fetchImpl, now, turn })
+      bindAlerts(wired.alerts, agent)
+      await flushAlerts()
       await listenWithRetry(async () => {
         touchHealth(config.stateDir, now())
-        const stopHeartbeat = startHeartbeat(config.stateDir, now)
+        const stopHeartbeat = startHeartbeat(config.stateDir, now, HEALTH_INTERVAL_MS, healthGate)
         try {
           await agent.listen({ mode, signal })
         } finally {
@@ -195,6 +234,7 @@ export async function runSupport(env: Record<string, string | undefined>, deps?:
       }, signal)
     }
   } finally {
+    process.off("unhandledRejection", onRejection)
     if (!deps?.signal) {
       controller.abort()
       process.off("SIGTERM", stop)
@@ -205,7 +245,7 @@ export async function runSupport(env: Record<string, string | undefined>, deps?:
 
 export async function wireSupport(config: Config, deps: RuntimeDeps): Promise<{ turn: TurnState; connections: ConnectionState; alerts: AlertState }> {
   const now = deps.now ?? (() => new Date())
-  const turn = deps.turn ?? loadTurnState(config.stateDir, now())
+  const turn = deps.turn ?? loadTurnState(config.stateDir, now(), config.senderBurstWindowSeconds * 1000)
   const connections = loadConnections(config.stateDir, now())
   const alerts = loadAlerts(config.stateDir, now())
   const owners = new Map<string, { owner: string; at: number }>()
@@ -223,8 +263,8 @@ export async function wireSupport(config: Config, deps: RuntimeDeps): Promise<{ 
       owner,
       contextId: req.contextId || did,
       now: now(),
+      clock: now,
       fetchImpl: deps.fetchImpl,
-      bundle: readJson<BundleFile>(config.stateDir, "bundle.json"),
       onEvent: (event) => {
         if (event === "budget_50" || event === "budget_80") {
           void raise(config, alerts, now(), deps.agent, { kind: event })
@@ -238,6 +278,7 @@ export async function wireSupport(config: Config, deps: RuntimeDeps): Promise<{ 
         address: req.sender?.address || did,
       })
     }
+    healthGate.quietUntil = 0
     touchHealth(config.stateDir, now())
     saveConnections(config.stateDir, connections)
     saveAlerts(config.stateDir, alerts)
@@ -245,38 +286,64 @@ export async function wireSupport(config: Config, deps: RuntimeDeps): Promise<{ 
   })
 
   deps.agent.onConnectionRequest(async (req) => {
-    const decision = decideConnection({
-      owner: req.owner ?? "",
-      now: now(),
-      stateDir: config.stateDir,
-      policy: config.connectionPolicy,
-      acceptsPerDay: config.acceptsPerDay,
-      state: connections,
-    })
-    if (decision.action === "accept" || decision.action === "block") {
-      await deps.agent.respondConnection(req.linkId, decision.action)
+    let accepted = false
+    try {
+      const decision = decideConnection({
+        owner: req.owner ?? "",
+        now: now(),
+        stateDir: config.stateDir,
+        policy: config.connectionPolicy,
+        acceptsPerDay: config.acceptsPerDay,
+        enabled: config.enabled,
+        state: connections,
+      })
+      accepted = decision.action === "accept"
+      if (decision.action === "accept" || decision.action === "block") {
+        await deps.agent.respondConnection(req.linkId, decision.action)
+      }
+      if (decision.alert) await raise(config, alerts, now(), deps.agent, { kind: "connection_cap" })
+    } catch {
+      if (accepted) connections.accepts = Math.max(0, connections.accepts - 1)
+      logLine("warn", "connection_failed", { error_code: "connection_failed" }, config.logLevel)
     }
-    if (decision.alert) await raise(config, alerts, now(), deps.agent, { kind: "connection_cap" })
-    saveConnections(config.stateDir, connections)
-    saveAlerts(config.stateDir, alerts)
+    try {
+      saveConnections(config.stateDir, connections)
+      saveAlerts(config.stateDir, alerts)
+    } catch {
+      logLine("warn", "connection_failed", { error_code: "connection_failed" }, config.logLevel)
+    }
   })
 
   return { turn, connections, alerts }
 }
 
 async function raise(config: Config, state: AlertState, now: Date, agent: SupportAgent, info: AlertInfo): Promise<void> {
-  await dispatchAlert({
-    info,
-    now,
-    state,
-    alertTo: config.alertTo,
-    alertsPerDay: config.alertsPerDay,
-    logLevel: config.logLevel,
-    send: async (to, text) => {
-      await agent.send(to, text)
-    },
-  })
-  saveAlerts(config.stateDir, state)
+  try {
+    await dispatchAlert({
+      info,
+      now,
+      state,
+      alertTo: config.alertTo,
+      alertsPerDay: config.alertsPerDay,
+      logLevel: config.logLevel,
+      send: async (to, text) => {
+        await agent.send(to, text)
+      },
+    })
+  } catch {
+    logLine("warn", "alert_failed", { error_code: "alert_failed" }, config.logLevel)
+  }
+  try {
+    saveAlerts(config.stateDir, state)
+  } catch {
+    logLine("warn", "alert_failed", { error_code: "alert_failed" }, config.logLevel)
+  }
+}
+
+function rejectionCode(reason: unknown): string {
+  const code = stringField(reason, "code")
+  if (/^[a-z0-9_]{1,40}$/.test(code)) return code
+  return "unhandled_rejection"
 }
 
 async function ownerFor(agent: SupportAgent, did: string, owners: Map<string, { owner: string; at: number }>, at: number): Promise<string> {
@@ -311,8 +378,13 @@ async function loadAgent(config: Config, fetchImpl?: typeof fetch): Promise<Supp
     maxConcurrent: config.maxConcurrent,
     fetchImpl,
     logger: {
-      info() {},
+      info(line: string) {
+        if (!line.includes("outcome=")) return
+        healthGate.quietUntil = 0
+        touchHealth(config.stateDir, new Date())
+      },
       warn(line: string) {
+        healthGate.quietUntil = Date.now() + HEALTH_QUIET_MS
         logLine("warn", "poll_retry", { error_code: pollWarnCode(line) }, config.logLevel)
       },
     },

@@ -11,6 +11,7 @@ export const ENV_KEYS = [
   "P2A_TOKEN",
   "P2A_TOKEN_FILE",
   "P2A_URL",
+  "P2A_LISTEN_MODE",
   "LLM_API_KEY",
   "LLM_API_KEY_FILE",
   "OPENCHEAP_API_KEY",
@@ -45,6 +46,7 @@ export const ENV_KEYS = [
   "MIN_SCORE",
   "MEMORY_TURNS",
   "SENDER_BURST",
+  "RELAY_DIDS",
   "SENDER_PER_DAY",
   "OWNER_PER_DAY",
   "CONTEXT_TURNS_PER_DAY",
@@ -57,6 +59,9 @@ export const ENV_KEYS = [
   "P2A_SUPPORT_LINEAR_API_KEY_FILE",
   "P2A_SUPPORT_LINEAR_TEAM_KEY",
   "P2A_SUPPORT_LINEAR_SHOW_URLS",
+  "P2A_SUPPORT_LINEAR_BUG_LABEL",
+  "P2A_SUPPORT_LINEAR_FEATURE_LABEL",
+  "P2A_SUPPORT_LINEAR_FEEDBACK_LABEL",
   "CLARIFY_MAX_ROUNDS",
   "CLARIFY_TTL_HOURS",
 ] as const
@@ -64,6 +69,8 @@ export const ENV_KEYS = [
 export interface Config {
   p2aToken?: string
   p2aUrl?: string
+  listenMode: "stream" | "poll"
+  relayDids: string[]
   llmApiKey?: string
   llmBaseUrl: string
   llmModel: string
@@ -107,6 +114,9 @@ export interface Config {
   linearApiKey?: string
   linearTeamKey?: string
   linearShowUrls: boolean
+  linearBugLabel: string
+  linearFeatureLabel: string
+  linearFeedbackLabel: string
   linearEnabled: boolean
   clarifyMaxRounds: number
   clarifyTtlHours: number
@@ -152,12 +162,14 @@ export function loadConfig(env: Env, options: { requireSecrets?: boolean } = {})
   return {
     p2aToken,
     p2aUrl: optional(env, "P2A_URL"),
+    listenMode: listenModeOf(env),
+    relayDids: csv(env, "RELAY_DIDS"),
     llmApiKey,
     llmBaseUrl: optional(env, "LLM_BASE_URL") ?? "https://api.opencheap.si/v1",
     llmModel: optional(env, "LLM_MODEL") ?? "deepseek-v4-pro",
     llmPriceInPerM: numberValue(env, "LLM_PRICE_IN_PER_M", 0.06),
     llmPriceOutPerM: numberValue(env, "LLM_PRICE_OUT_PER_M", 0.12),
-    llmTimeoutMs: numberValue(env, "LLM_TIMEOUT_MS", 45000),
+    llmTimeoutMs: timeoutMs(env),
     sourceUrls,
     docsDirs: csv(env, "DOCS_DIRS", ["./docs"]),
     docsInclude: csv(env, "DOCS_INCLUDE", ["md", "mdx", "txt", "html", "ts", "py"]),
@@ -195,8 +207,11 @@ export function loadConfig(env: Env, options: { requireSecrets?: boolean } = {})
     linearApiKey,
     linearTeamKey,
     linearShowUrls,
+    linearBugLabel: labelName(env, "P2A_SUPPORT_LINEAR_BUG_LABEL", "Bug"),
+    linearFeatureLabel: labelName(env, "P2A_SUPPORT_LINEAR_FEATURE_LABEL", "Feature"),
+    linearFeedbackLabel: labelName(env, "P2A_SUPPORT_LINEAR_FEEDBACK_LABEL", "Feedback"),
     linearEnabled: Boolean(linearApiKey && linearTeamKey),
-    clarifyMaxRounds: boundedInt(env, "CLARIFY_MAX_ROUNDS", 2, 0, 4),
+    clarifyMaxRounds: boundedInt(env, "CLARIFY_MAX_ROUNDS", 1, 0, 4),
     clarifyTtlHours: boundedInt(env, "CLARIFY_TTL_HOURS", 24, 1, 168),
   }
 }
@@ -244,6 +259,19 @@ function readSecretFile(path: string, variable: string): string | undefined {
   return text.trim()
 }
 
+function listenModeOf(env: Env): "stream" | "poll" {
+  const value = optional(env, "P2A_LISTEN_MODE") ?? "stream"
+  if (value === "stream" || value === "poll") return value
+  throw new ConfigError("P2A_LISTEN_MODE is invalid")
+}
+
+function labelName(env: Env, name: string, fallback: string): string {
+  const value = optional(env, name)
+  if (!value) return fallback
+  if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{0,40}$/.test(value)) throw new ConfigError(`${name} is invalid`)
+  return value
+}
+
 function optional(env: Env, name: string): string | undefined {
   const value = env[name]
   if (value === undefined) return undefined
@@ -264,6 +292,12 @@ function flag(env: Env, name: string, fallback: boolean): boolean {
   if (folded === "1" || folded === "true" || folded === "yes" || folded === "on") return true
   if (folded === "0" || folded === "false" || folded === "no" || folded === "off") return false
   throw new ConfigError(`${name} is invalid`)
+}
+
+function timeoutMs(env: Env): number {
+  const value = numberValue(env, "LLM_TIMEOUT_MS", 45000)
+  if (value < 1000) throw new ConfigError("LLM_TIMEOUT_MS is invalid")
+  return value
 }
 
 function numberValue(env: Env, name: string, fallback: number): number {

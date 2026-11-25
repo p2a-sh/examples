@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFile
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { fileable, heuristicPresent } from "../src/clarify.js"
+import { fileable, heuristicPresent, reportIsClear, wantsFiled } from "../src/clarify.js"
+import { isProductReport } from "../src/classify.js"
 import { loadConfig, type Config } from "../src/config.js"
 import { createLinearClient, fileBugReport, senderKey, type LinearClient, type LinearIssue } from "../src/linear.js"
 import { activeLockCount, withKey } from "../src/locks.js"
@@ -52,30 +53,32 @@ function model(): { fetchImpl: typeof fetch; bodies: string[] } {
     const parsed = JSON.parse(body) as { max_tokens?: number; messages?: { role: string; content: string }[] }
     const system = parsed.messages?.find((item) => item.role === "system")?.content ?? ""
     const user = parsed.messages?.find((item) => item.role === "user")?.content ?? ""
-    if (system.includes("enough detail")) {
+    if (system.includes("clear enough to file")) {
       if (parsed.max_tokens !== 1500) throw new Error("clarify tokens")
       const ready = user.includes("error 418") && user.includes("should")
       const content = ready
         ? JSON.stringify({
+            clear: true,
             present: ["surface", "action", "expected", "actual", "repro"],
             missing: ["scope"],
-            question: "Which client were you using?",
+            question: "",
           })
         : JSON.stringify({
+            clear: false,
             present: ["surface"],
             missing: ["action", "expected", "actual", "repro", "scope"],
             question: "What happened, and what did you expect?",
           })
       return chat(content)
     }
-    if (parsed.max_tokens !== 1500) throw new Error("judge tokens")
+    if (parsed.max_tokens !== 4000) throw new Error("judge tokens")
     return chat(JSON.stringify({ identifier: user.includes(BETA) ? "SUP-2" : null }))
   }
   return { fetchImpl, bodies }
 }
 
-function tracker(): { client: LinearClient; calls: { op: string; text: string; title?: string; needsInfo?: boolean }[] } {
-  const calls: { op: string; text: string; title?: string; needsInfo?: boolean }[] = []
+function tracker(): { client: LinearClient; calls: { op: string; text: string; title?: string; needsInfo?: boolean; label?: string }[] } {
+  const calls: { op: string; text: string; title?: string; needsInfo?: boolean; label?: string }[] = []
   let created = 0
   const client: LinearClient = {
     async searchOpen(term) {
@@ -93,7 +96,7 @@ function tracker(): { client: LinearClient; calls: { op: string; text: string; t
       calls.push({ op: "comment", text: body })
     },
     async create(title, description, options) {
-      calls.push({ op: "create", text: description, title, needsInfo: options?.needsInfo === true })
+      calls.push({ op: "create", text: description, title, needsInfo: options?.needsInfo === true, label: options?.label })
       created += 1
       const identifier = `SUP-${created}`
       return { id: `iss-${created}`, identifier, title, description, url: `https://example.test/${identifier}` }
@@ -150,7 +153,7 @@ describe("locks", () => {
 
 describe("clarify config and rubric", () => {
   it("bounds the clarification settings", () => {
-    expect(loadConfig({}).clarifyMaxRounds).toBe(2)
+    expect(loadConfig({}).clarifyMaxRounds).toBe(1)
     expect(loadConfig({}).clarifyTtlHours).toBe(24)
     expect(loadConfig({ CLARIFY_MAX_ROUNDS: "0" }).clarifyMaxRounds).toBe(0)
     expect(loadConfig({ CLARIFY_TTL_HOURS: "168" }).clarifyTtlHours).toBe(168)
@@ -168,6 +171,7 @@ describe("clarify config and rubric", () => {
     expect(question).toContain("page")
     expect(question).toContain("happened")
     expect(question).not.toContain("steps")
+    expect(question).toContain('reply "file it"')
     expect(question).not.toMatch(/https?:/)
   })
 
@@ -197,10 +201,10 @@ describe("clarify config and rubric", () => {
 describe("clarifying a report", () => {
   it("keeps two relayed conversations apart when they share the gateway DID", async () => {
     const dir = folder()
-    const cfg = config(dir)
+    const gateway = "did:example:gateway"
+    const cfg = config(dir, { RELAY_DIDS: gateway })
     const { fetchImpl } = model()
     const { client, calls } = tracker()
-    const gateway = "did:example:gateway"
     const send = (contextId: string, message: string, requestId: string) => handleTurn({
       config: cfg,
       state: emptyTurnState(NOW),
@@ -220,6 +224,33 @@ describe("clarifying a report", () => {
     expect(entries).toHaveLength(2)
     expect(entries.find((entry) => entry.facts.join(" ").includes(ALPHA))?.facts.join(" ")).not.toContain(BETA)
     expect(calls.filter((call) => call.op === "create")).toEqual([])
+  })
+
+  it("keeps one open report when a direct sender's context id changes", async () => {
+    const dir = folder()
+    const cfg = config(dir)
+    const { fetchImpl } = model()
+    const { client } = tracker()
+    const send = (contextId: string, message: string, requestId: string) => handleTurn({
+      config: cfg,
+      state: emptyTurnState(NOW),
+      message,
+      did: DID_A,
+      senderDid: DID_A,
+      requestId,
+      owner: "owner",
+      contextId,
+      now: NOW,
+      linear: client,
+      fetchImpl,
+    })
+    await send("ctx-one", `the p2a sdk is broken ${ALPHA}`, "req-direct-1")
+    const filed = await send("ctx-two", "file it", "req-direct-2")
+    expect(filed.text).toContain("I opened")
+    const entries = pending(dir).entries
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.state).toBe("filed")
+    expect(entries[0]?.facts.join(" ")).toContain(ALPHA)
   })
 
   it("keeps two senders apart, replays a question, and files needs-info at the round cap", async () => {
@@ -249,7 +280,8 @@ describe("clarifying a report", () => {
     try {
       const a1 = await send(DID_A, `the p2a sdk is broken ${ALPHA}`, "req-zephyr-1")
       expect(a1.reason).toBe("answer")
-      expect(a1.text).toBe("What happened, and what did you expect?")
+      expect(a1.text).toContain("What happened, and what did you expect?")
+      expect(a1.text).toContain('reply "file it"')
       expect(calls).toEqual([])
       const saved = pending(dir)
       expect(saved.entries).toHaveLength(1)
@@ -266,7 +298,8 @@ describe("clarifying a report", () => {
       expect(pending(dir).entries[0]?.facts).toEqual(saved.entries[0]?.facts)
 
       const b1 = await send(DID_B, `the p2a tool is broken ${BETA}`, "req-quasar-1")
-      expect(b1.text).toBe("What happened, and what did you expect?")
+      expect(b1.text).toContain("What happened, and what did you expect?")
+      expect(b1.text).toContain('reply "file it"')
       expect(b1.text).not.toContain(ALPHA)
       const both = pending(dir)
       const entryA = both.entries.find((entry) => entry.key === senderKey(DID_A))
@@ -276,10 +309,18 @@ describe("clarifying a report", () => {
       expect(entryB?.facts.join("\n")).toContain(BETA)
       expect(entryB?.facts.join("\n")).not.toContain(ALPHA)
 
+      const beforeA = calls.length
       const a2 = await send(DID_A, `the p2a sdk is still broken ${ALPHA}`, "req-zephyr-2")
-      expect(a2.text).toBe("What happened, and what did you expect?")
+      expect(a2.text).toContain("needs-info")
+      expect(a2.text).toContain("SUP-1")
+      expect(a2.text).not.toContain('reply "file it"')
       expect(a2.text).not.toContain(BETA)
-      expect(calls).toEqual([])
+      const aCalls = calls.slice(beforeA)
+      expect(aCalls.map((call) => call.op)).toEqual(["search", "create"])
+      expect(aCalls[1]?.needsInfo).toBe(true)
+      expect(aCalls.every((call) => !call.text.includes(BETA))).toBe(true)
+      expect(aCalls.some((call) => call.text.includes(ALPHA))).toBe(true)
+      expect(aCalls.some((call) => call.text.includes("Missing:"))).toBe(true)
 
       const beforeB = calls.length
       const b2 = await send(
@@ -294,18 +335,6 @@ describe("clarifying a report", () => {
       expect(bCalls.map((call) => call.op)).toEqual(["search", "comment"])
       expect(bCalls.every((call) => !call.text.includes(ALPHA))).toBe(true)
       expect(bCalls.some((call) => call.text.includes(BETA))).toBe(true)
-
-      const beforeA = calls.length
-      const a3 = await send(DID_A, `the p2a sdk is broken again ${ALPHA}`, "req-zephyr-3")
-      expect(a3.text).toContain("needs-info")
-      expect(a3.text).toContain("SUP-1")
-      expect(a3.text).not.toContain(BETA)
-      const aCalls = calls.slice(beforeA)
-      expect(aCalls.map((call) => call.op)).toEqual(["search", "create"])
-      expect(aCalls[1]?.needsInfo).toBe(true)
-      expect(aCalls.every((call) => !call.text.includes(BETA))).toBe(true)
-      expect(aCalls.some((call) => call.text.includes(ALPHA))).toBe(true)
-      expect(aCalls.some((call) => call.text.includes("Missing:"))).toBe(true)
     } finally {
       process.stdout.write = original
     }
@@ -325,15 +354,21 @@ describe("clarifying a report", () => {
     expect(joined).not.toContain("req-zephyr")
     expect(joined).not.toContain("req-quasar")
     expect(joined).toContain("clarify_asked")
-    expect(joined).toContain("clarify_filed")
+    expect(joined).toContain("report_filed")
+    expect(joined).not.toContain("clarify_filed")
+    expect(joined).toContain("\"clarified\":true")
     expect(joined).toContain("clarify_idempotent")
     for (const line of joined.split("\n")) {
       if (!line.startsWith("{")) continue
       const record = JSON.parse(line) as Record<string, unknown>
       for (const key of Object.keys(record)) expect(LOG_FIELDS).toContain(key)
-      if (String(record.event).startsWith("clarify_")) {
+      if (record.event === "report_filed" || String(record.event).startsWith("clarify_")) {
         expect(record.category === "needs_info" || /^missing:\d+$/.test(String(record.category))).toBe(true)
         expect(typeof record.count).toBe("number")
+      }
+      if (record.event === "report_filed") {
+        expect(typeof record.clarified).toBe("boolean")
+        expect(["bug", "feature", "feedback"]).toContain(record.kind)
       }
     }
     expect(readdirSync(dir).filter((name) => name.endsWith(".tmp"))).toEqual([])
@@ -375,12 +410,12 @@ describe("clarifying a report", () => {
       const result = await handleTurn({
         config: config(dir),
         state: emptyTurnState(NOW),
-        message: "hello p2a",
+        message: "file it",
         did,
         senderDid: did,
         requestId: "req-expire-2",
         owner: "owner",
-        contextId: "fresh",
+        contextId: did,
         now: NOW,
         linear: client,
         fetchImpl: async (_url, init) => {
@@ -390,7 +425,8 @@ describe("clarifying a report", () => {
           return chat("See the guide.")
         },
       })
-      expect(result.text).toContain("guide")
+      expect(result.text).not.toContain(phrase)
+      expect(result.text).not.toContain("I opened")
     } finally {
       process.stdout.write = original
     }
@@ -457,7 +493,8 @@ describe("clarifying a report", () => {
       linear: client,
       fetchImpl,
     })
-    expect(fresh.text).toBe("What happened, and what did you expect?")
+    expect(fresh.text).toContain("What happened, and what did you expect?")
+    expect(fresh.text).toContain('reply "file it"')
     const facts = pending(dir).entries[0]?.facts.join("\n") ?? ""
     expect(facts).toContain(ALPHA)
     expect(facts).not.toContain(phrase)
@@ -671,24 +708,213 @@ describe("clarifying a report", () => {
   })
 })
 
+describe("filing without forcing a clarification", () => {
+  it("files a clear report immediately", async () => {
+    const dir = folder()
+    const bugClient = tracker()
+    const lines: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      lines.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    let bug: Awaited<ReturnType<typeof handleTurn>>
+    try {
+      bug = await handleTurn({
+        config: config(dir),
+        state: emptyTurnState(NOW),
+        message: "the connect button crashes in p2a",
+        did: DID_A,
+        senderDid: DID_A,
+        requestId: "req-clear-bug",
+        owner: "owner",
+        contextId: DID_A,
+        now: NOW,
+        linear: bugClient.client,
+        fetchImpl: async () => {
+          throw new Error("clarity model should not run")
+        },
+      })
+    } finally {
+      process.stdout.write = write
+    }
+    const filed = lines.map((line) => line.trim()).filter((line) => line.includes("report_filed"))
+    expect(filed).toHaveLength(1)
+    const record = JSON.parse(filed[0] ?? "{}") as { clarified?: boolean; kind?: string }
+    expect(record.clarified).toBe(false)
+    expect(record.kind).toBe("bug")
+    expect(lines.join("")).not.toContain("clarify_filed")
+    expect(bug.text).toContain("I opened")
+    expect(bug.text).toContain("as a bug")
+    expect(bug.text).toContain("SUP-1")
+    expect(bug.text).not.toContain("needs-info")
+    expect(bug.text).not.toContain('reply "file it"')
+    expect(bugClient.calls.map((call) => call.op)).toEqual(["search", "create"])
+    expect(bugClient.calls[1]?.needsInfo).toBe(false)
+    expect(bugClient.calls[1]?.label).toBe("Bug")
+    expect(bugClient.calls[1]?.title?.startsWith("Bug: ")).toBe(true)
+    expect(bugClient.calls[1]?.text).toContain("connect button")
+
+    const featureClient = tracker()
+    const feature = await handleTurn({
+      config: config(dir),
+      state: emptyTurnState(NOW),
+      message: "please add an export button to the dashboard",
+      did: DID_B,
+      senderDid: DID_B,
+      requestId: "req-clear-feature",
+      owner: "owner",
+      contextId: DID_B,
+      now: NOW,
+      linear: featureClient.client,
+      fetchImpl: async () => {
+        throw new Error("clarity model should not run")
+      },
+    })
+    expect(feature.text).toContain("I opened")
+    expect(feature.text).toContain("as a feature request")
+    expect(feature.text).not.toContain('reply "file it"')
+    expect(featureClient.calls.map((call) => call.op)).toEqual(["search", "create"])
+    expect(featureClient.calls[1]?.needsInfo).toBe(false)
+    expect(featureClient.calls[1]?.label).toBe("Feature")
+    expect(featureClient.calls[1]?.title?.startsWith("Feature: ")).toBe(true)
+    expect(featureClient.calls[1]?.text).toContain("export button")
+
+    const feedbackClient = tracker()
+    const feedback = await handleTurn({
+      config: config(dir),
+      state: emptyTurnState(NOW),
+      message: "feedback: the inbox stays empty",
+      did: "did:example:feedback",
+      senderDid: "did:example:feedback",
+      requestId: "req-clear-feedback",
+      owner: "owner",
+      contextId: "did:example:feedback",
+      now: NOW,
+      linear: feedbackClient.client,
+      fetchImpl: async () => {
+        throw new Error("clarity model should not run")
+      },
+    })
+    expect(feedback.text).toContain("as feedback")
+    expect(feedback.text).not.toContain('reply "file it"')
+    expect(feedbackClient.calls.map((call) => call.op)).toEqual(["search", "create"])
+    expect(feedbackClient.calls[1]?.label).toBe("Feedback")
+    expect(feedbackClient.calls[1]?.title?.startsWith("Feedback: ")).toBe(true)
+
+    const judged = tracker()
+    const invite = await handleTurn({
+      config: config(dir),
+      state: emptyTurnState(NOW),
+      message: "invite is not working for a teammate in p2a",
+      did: "did:example:invite",
+      senderDid: "did:example:invite",
+      requestId: "req-clear-model",
+      owner: "owner",
+      contextId: "did:example:invite",
+      now: NOW,
+      linear: judged.client,
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: { role: string; content: string }[] }
+        const system = body.messages?.find((item) => item.role === "system")?.content ?? ""
+        if (!system.includes("clear enough to file")) throw new Error("unexpected model call")
+        return chat(JSON.stringify({ clear: true, present: ["actual"], missing: [], question: "" }))
+      },
+    })
+    expect(invite.llmCalls).toBe(1)
+    expect(invite.text).toContain("I opened")
+    expect(invite.text).not.toContain('reply "file it"')
+    expect(judged.calls.map((call) => call.op)).toEqual(["search", "create"])
+    expect(judged.calls[1]?.needsInfo).toBe(false)
+    expect(isProductReport("please add an export button to the p2a dashboard")).toBe(true)
+    expect(isProductReport("feedback: the inbox stays empty")).toBe(true)
+    expect(isProductReport("how do I add a token")).toBe(false)
+    expect(reportIsClear("the connect button crashes")).toBe(true)
+    expect(reportIsClear("the p2a sdk is broken")).toBe(false)
+    expect(reportIsClear("the p2a sdk is broken somewhere")).toBe(false)
+    expect(reportIsClear("the p2a tool is broken")).toBe(false)
+    expect(wantsFiled("just file it")).toBe(true)
+    expect(wantsFiled("file it")).toBe(true)
+    expect(wantsFiled("as is")).toBe(true)
+    expect(wantsFiled("as-is")).toBe(true)
+    expect(wantsFiled("the file upload is broken")).toBe(false)
+  })
+
+  it("asks once with a file-as-is option, then files the original report", async () => {
+    const dir = folder()
+    const cfg = config(dir, { CLARIFY_MAX_ROUNDS: "4" })
+    const { fetchImpl } = model()
+    const { client, calls } = tracker()
+    const send = (did: string, message: string, requestId: string) => handleTurn({
+      config: cfg,
+      state: emptyTurnState(NOW),
+      message,
+      did,
+      senderDid: did,
+      requestId,
+      owner: "owner",
+      contextId: did,
+      now: NOW,
+      linear: client,
+      fetchImpl,
+    })
+    const asked = await send(DID_A, "the p2a sdk is broken", "req-ask-1")
+    expect(asked.text).toContain("What happened, and what did you expect?")
+    expect(asked.text).toContain('reply "file it"')
+    expect((asked.text.match(/\?/g) ?? []).length).toBeLessThanOrEqual(2)
+    expect(calls).toEqual([])
+    expect(pending(dir).entries[0]?.state).toBe("asking")
+
+    const filed = await send(DID_A, "just file it", "req-ask-2")
+    expect(filed.text).toContain("I opened")
+    expect(filed.text).toContain("SUP-1")
+    expect(filed.text).not.toContain('reply "file it"')
+    expect(calls.map((call) => call.op)).toEqual(["search", "create"])
+    const description = calls[1]?.text ?? ""
+    expect(description).toContain("the p2a sdk is broken")
+    expect(description).not.toContain("just file it")
+    expect(pending(dir).entries.find((entry) => entry.key === senderKey(DID_A))?.state).toBe("filed")
+
+    const other = await send(DID_B, "the p2a sdk is broken", "req-other-1")
+    expect(other.text).toContain('reply "file it"')
+    const poem = await send(DID_B, "write a poem", "req-other-2")
+    expect(poem.text).toContain("I opened")
+    expect(poem.text).not.toContain("I only answer")
+    expect(poem.text).not.toContain('reply "file it"')
+    const poemCreate = calls.filter((call) => call.op === "create").at(-1)
+    expect(poemCreate?.text).toContain("the p2a sdk is broken")
+
+    const third = "did:example:third"
+    const again = await send(third, "the p2a sdk is broken", "req-third-1")
+    expect(again.text).toContain('reply "file it"')
+    const vague = await send(third, "still nothing useful", "req-third-2")
+    expect(vague.text).toContain("I opened")
+    expect(vague.text).not.toContain('reply "file it"')
+    const thirdCreate = calls.filter((call) => call.op === "create").at(-1)
+    expect(thirdCreate?.text).toContain("the p2a sdk is broken")
+    expect(thirdCreate?.text).toContain("still nothing useful")
+  })
+})
+
 describe("needs-info filing", () => {
   it("looks up the label without creating one, and only on create", async () => {
     const source = readFileSync(new URL("../src/linear.ts", import.meta.url), "utf8")
     expect(source.includes("labelCreate")).toBe(false)
     expect(source.includes("issueLabelCreate")).toBe(false)
-    const seen: { query: string; input?: unknown }[] = []
+    const seen: { query: string; input?: unknown; name?: string }[] = []
     const fetchImpl: typeof fetch = async (_url, init) => {
-      const parsed = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { input?: unknown } }
+      const parsed = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { input?: unknown; name?: string } }
       const query = parsed.query ?? ""
-      seen.push({ query, input: parsed.variables?.input })
+      const name = parsed.variables?.name?.toLowerCase() ?? ""
+      seen.push({ query, input: parsed.variables?.input, name })
       if (query.includes("teams(")) {
         return new Response(JSON.stringify({ data: { teams: { nodes: [{ id: "team-1" }] } } }), { status: 200 })
       }
-      if (query.includes("needs-info")) {
-        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ id: "lab-need", name: "Needs-Info" }] } } }), { status: 200 })
+      if (query.includes("issueLabels") && name === "needs-info") {
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ id: "lab-need", name: "Needs-Info", team: { key: "P2A" } }] } } }), { status: 200 })
       }
       if (query.includes("issueLabels")) {
-        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ id: "lab-bug", name: "Bug" }] } } }), { status: 200 })
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ id: "lab-bug", name: "Bug", team: null }] } } }), { status: 200 })
       }
       if (query.includes("issueCreate")) {
         return new Response(JSON.stringify({
@@ -700,7 +926,7 @@ describe("needs-info filing", () => {
     const dir = folder()
     const client = createLinearClient(config(dir), fetchImpl)
     await client.create("title", "the p2a sdk is broken")
-    expect(seen.some((call) => call.query.includes("needs-info"))).toBe(false)
+    expect(seen.some((call) => call.name === "needs-info")).toBe(false)
     expect(seen.find((call) => call.query.includes("issueCreate"))?.input).toEqual({
       teamId: "team-1",
       title: "title",
@@ -716,7 +942,7 @@ describe("needs-info filing", () => {
       description: "the p2a sdk is broken",
       labelIds: ["lab-bug", "lab-need"],
     })
-    expect(seen.filter((call) => call.query.includes("Bug"))).toHaveLength(0)
+    expect(seen.filter((call) => call.name === "bug")).toHaveLength(0)
     seen.length = 0
     await client.create("title", "again", { needsInfo: true })
     expect(seen.filter((call) => call.query.includes("issueLabels"))).toHaveLength(0)

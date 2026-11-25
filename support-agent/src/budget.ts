@@ -1,4 +1,4 @@
-import { utcDay } from "./limits.js"
+import { dayMovedForward, utcDay } from "./limits.js"
 
 export interface BudgetState {
   day: string
@@ -34,9 +34,8 @@ export function usageUsd(promptTokens: number, outputTokens: number, priceInPerM
 }
 
 export function rollBudget(state: BudgetState, now: Date): void {
-  const day = utcDay(now)
-  if (state.day === day) return
-  state.day = day
+  if (!dayMovedForward(state.day, now)) return
+  state.day = utcDay(now)
   state.spent = 0
   state.reserved = 0
   state.llmCalls = 0
@@ -53,10 +52,8 @@ export function tryReserve(state: BudgetState, cost: number, limit: number, now:
     return true
   }
   if (state.paused) return false
-  if (state.spent + state.reserved + cost > limit) {
-    state.paused = true
-    return false
-  }
+  // A reserve that does not fit refuses this call only. The day pauses in settle, once real spend reaches the limit.
+  if (state.spent + state.reserved + cost > limit) return false
   state.reserved += cost
   return true
 }

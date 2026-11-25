@@ -43,7 +43,7 @@ export function buildMessages(options: {
 }
 
 function escapeAngles(text: string): string {
-  return text.replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
 }
 
 function escapeAttr(text: string): string {

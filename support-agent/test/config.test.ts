@@ -55,7 +55,7 @@ describe("config", () => {
     const config = loadConfig({})
     expect(config.productName).toBe("p2a")
     expect(config.dailyBudgetUsd).toBe(2)
-    expect(config.clarifyMaxRounds).toBe(2)
+    expect(config.clarifyMaxRounds).toBe(1)
     expect(config.clarifyTtlHours).toBe(24)
     expect(loadConfig({ CLARIFY_MAX_ROUNDS: "0" }).clarifyMaxRounds).toBe(0)
     expect(loadConfig({ CLARIFY_MAX_ROUNDS: "4" }).clarifyMaxRounds).toBe(4)
@@ -65,12 +65,22 @@ describe("config", () => {
     expect(() => loadConfig({ CLARIFY_MAX_ROUNDS: "2.5" })).toThrow(/CLARIFY_MAX_ROUNDS/)
     expect(() => loadConfig({ CLARIFY_TTL_HOURS: "0" })).toThrow(/CLARIFY_TTL_HOURS/)
     expect(() => loadConfig({ CLARIFY_TTL_HOURS: "169" })).toThrow(/CLARIFY_TTL_HOURS/)
+    expect(config.listenMode).toBe("stream")
+    expect(config.relayDids).toEqual([])
+    expect(loadConfig({ P2A_LISTEN_MODE: "poll" }).listenMode).toBe("poll")
+    expect(loadConfig({ RELAY_DIDS: "did:example:gateway, did:example:other" }).relayDids).toEqual([
+      "did:example:gateway",
+      "did:example:other",
+    ])
+    expect(() => loadConfig({ P2A_LISTEN_MODE: "nope" })).toThrow(/P2A_LISTEN_MODE/)
     expect(config.llmBaseUrl).toBe("https://api.opencheap.si/v1")
     expect(config.llmModel).toBe("deepseek-v4-pro")
     expect(loadConfig({ LLM_BASE_URL: "https://api.example.test/v1", LLM_MODEL: "other-model" }).llmBaseUrl).toBe("https://api.example.test/v1")
     expect(loadConfig({ LLM_BASE_URL: "https://api.example.test/v1", LLM_MODEL: "other-model" }).llmModel).toBe("other-model")
     expect(loadConfig({ OPENCHEAP_API_KEY: "alias-key" }).llmApiKey).toBe("alias-key")
     expect(() => loadConfig({ DAILY_BUDGET_USD: "nope" })).toThrow(/DAILY_BUDGET_USD/)
+    expect(() => loadConfig({ LLM_TIMEOUT_MS: "0" })).toThrow(/LLM_TIMEOUT_MS/)
+    expect(loadConfig({ LLM_TIMEOUT_MS: "1000" }).llmTimeoutMs).toBe(1000)
   })
 })
 

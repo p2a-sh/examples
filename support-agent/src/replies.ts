@@ -1,3 +1,4 @@
+import type { ReportKind } from "./classify.js"
 import type { Config } from "./config.js"
 
 export function contact(config: Config): string {
@@ -65,8 +66,14 @@ export function linearDuplicateText(config: Config, identifier: string, url?: st
   return `This is already tracked as ${trackedAs(config, identifier, url)}.`
 }
 
-export function linearCreatedText(config: Config, identifier: string, url?: string): string {
-  return `I opened ${trackedAs(config, identifier, url)} for this.`
+const KIND_REPLY: Record<ReportKind, string> = {
+  bug: "a bug",
+  feature: "a feature request",
+  feedback: "feedback",
+}
+
+export function linearCreatedText(config: Config, identifier: string, url: string | undefined, kind: ReportKind): string {
+  return `I opened ${trackedAs(config, identifier, url)} as ${KIND_REPLY[kind]}.`
 }
 
 export function linearCappedText(config: Config): string {
@@ -90,12 +97,27 @@ const CLARIFY_PROMPTS: Record<string, string> = {
   scope: "which agent or client you used, and when it started",
 }
 
+const FILE_OPTION = 'You can answer, or reply "file it" to file this as written.'
+
+export function withFileOption(question: string): string {
+  const body = question.trim()
+  if (/\bfile it\b/i.test(body)) return body.slice(0, 600)
+  const extra = ` ${FILE_OPTION}`
+  const base = body || "What is the problem, or the change you want?"
+  const room = 600 - extra.length
+  const trimmed = base.length > room ? `${base.slice(0, Math.max(0, room - 1)).trimEnd()}…` : base
+  return `${trimmed}${extra}`
+}
+
 export function clarifyQuestionText(missing: readonly string[]): string {
   const ask = missing.filter((item) => CLARIFY_PROMPTS[item]).slice(0, 2)
-  if (ask.length === 0) return "Please add the missing detail about what went wrong."
   const first = CLARIFY_PROMPTS[ask[0] ?? ""]
-  if (ask.length === 1) return `Please tell me ${first}.`
-  return `Please tell me ${first}, and ${CLARIFY_PROMPTS[ask[1] ?? ""]}.`
+  const body = ask.length === 0
+    ? "What is the problem, or the change you want?"
+    : ask.length === 1
+      ? `Please tell me ${first}.`
+      : `Please tell me ${first}, and ${CLARIFY_PROMPTS[ask[1] ?? ""]}.`
+  return withFileOption(body)
 }
 
 export function linearNeedsInfoText(text: string): string {

@@ -58,6 +58,60 @@ describe("listen retry", () => {
     expect(calls).toBe(2)
   })
 
+  it("retries server errors, 425, and broken responses, and stops on a client error", async () => {
+    const secret = "listen-secret-body"
+    const logs: string[] = []
+    const original = process.stdout.write
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      logs.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    try {
+      for (const failure of [
+        { status: 500 },
+        { status: 425 },
+        { code: "invalid_response" },
+        { code: "rpc_error" },
+      ]) {
+        const controller = new AbortController()
+        let calls = 0
+        await listenWithRetry(
+          async () => {
+            calls += 1
+            if (calls === 1) throw Object.assign(new Error(secret), failure)
+            controller.abort()
+          },
+          controller.signal,
+          async () => {},
+          () => 0,
+        )
+        expect(calls).toBe(2)
+      }
+      let clientCalls = 0
+      let slept = false
+      await expect(listenWithRetry(
+        async () => {
+          clientCalls += 1
+          throw Object.assign(new Error(secret), { status: 400 })
+        },
+        new AbortController().signal,
+        async () => {
+          slept = true
+        },
+      )).rejects.toMatchObject({ status: 400 })
+      expect(clientCalls).toBe(1)
+      expect(slept).toBe(false)
+    } finally {
+      process.stdout.write = original
+    }
+    const joined = logs.join("")
+    expect(joined).toContain("http_500")
+    expect(joined).toContain("http_425")
+    expect(joined).toContain("invalid_response")
+    expect(joined).toContain("rpc_error")
+    expect(joined).not.toContain(secret)
+  })
+
   it("does not retry a config error", async () => {
     let slept = false
     await expect(

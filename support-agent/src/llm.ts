@@ -47,6 +47,7 @@ async function attempt(
 ): Promise<Omit<Completion, "provider">> {
   let errorCode: Completion["errorCode"] = "llm_failed"
   for (let tryNumber = 0; tryNumber < tries; tryNumber += 1) {
+    if (tryNumber > 0) await delay(RETRY_BACKOFF_MS)
     try {
       const response = await fetchImpl(`${route.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
@@ -62,7 +63,7 @@ async function attempt(
         }),
         signal: AbortSignal.timeout(route.timeoutMs),
       })
-      if (response.status >= 500) {
+      if (response.status === 429 || response.status >= 500) {
         errorCode = "llm_failed"
         continue
       }
@@ -101,6 +102,14 @@ async function attempt(
   }
   logLine("warn", errorCode ?? "llm_failed", { error_code: errorCode ?? "llm_failed" }, logLevel)
   return { text: "", errorCode }
+}
+
+const RETRY_BACKOFF_MS = 50
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
 }
 
 /**

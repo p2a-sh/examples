@@ -1,5 +1,5 @@
 import { fileExists, readText, writeJsonAtomic } from "./state.js"
-import { utcDay } from "./limits.js"
+import { dayMovedForward, utcDay } from "./limits.js"
 
 export interface ConnectionState {
   day: string
@@ -39,10 +39,11 @@ export function decideConnection(input: {
   stateDir: string
   policy: "accept_capped" | "manual"
   acceptsPerDay: number
+  enabled?: boolean
   state: ConnectionState
 }): { action: ConnectionAction; alert: boolean } {
   roll(input.state, input.now)
-  if (fileExists(input.stateDir, "KILL") || fileExists(input.stateDir, "PAUSED")) {
+  if (input.enabled === false || fileExists(input.stateDir, "KILL") || fileExists(input.stateDir, "PAUSED")) {
     input.state.deferred += 1
     return { action: "pending", alert: false }
   }
@@ -65,9 +66,8 @@ export function decideConnection(input: {
 }
 
 function roll(state: ConnectionState, now: Date): void {
-  const day = utcDay(now)
-  if (state.day === day) return
-  state.day = day
+  if (!dayMovedForward(state.day, now)) return
+  state.day = utcDay(now)
   state.accepts = 0
   state.alertedCap = false
   state.deferred = 0

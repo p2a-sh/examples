@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { buildBundle, type BundleFile } from "../src/bundle.ts"
-import { indexBundle, retrieve } from "../src/retrieve.ts"
+import { indexBundle, loadCachedBundle, retrieve } from "../src/retrieve.ts"
 
 const fixture = new URL("./fixtures/otherdocs/", import.meta.url).pathname
 
@@ -119,6 +119,45 @@ describe("bundle", () => {
     })
     expect(built.bundle?.chunks.map((chunk) => chunk.text)).toEqual(["previous public copy"])
   })
+
+  it("strips html documents and leaves tags that are part of markdown", async () => {
+    const dir = dirWith({
+      "note.md": "# Title\n\n<p>keep this tag</p>\n",
+      "page.html": "<html><body><p>Hello docs</p></body></html>\n",
+    })
+    const built = await buildBundle({ docsDirs: [dir] })
+    const md = built.bundle?.chunks.find((chunk) => chunk.source === "note.md")?.text ?? ""
+    const html = built.bundle?.chunks.find((chunk) => chunk.source === "page.html")?.text ?? ""
+    expect(md).toContain("# Title")
+    expect(md).toContain("<p>")
+    const page = await buildBundle({
+      sourceUrls: ["https://example.com/page"],
+      docsDirs: [],
+      fetchImpl: async () => new Response("<p>Hello page</p>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }),
+    })
+    const plain = await buildBundle({
+      sourceUrls: ["https://example.com/notes.txt"],
+      docsDirs: [],
+      fetchImpl: async () => new Response("# Title\n\n<p>keep</p>", { status: 200, headers: { "content-type": "text/plain" } }),
+    })
+    expect(html).toContain("Hello docs")
+    expect(html).not.toContain("<p>")
+    expect(page.bundle?.chunks[0]?.text).toContain("Hello page")
+    expect(page.bundle?.chunks[0]?.text).not.toContain("<p>")
+    expect(plain.bundle?.chunks.map((chunk) => chunk.text).join("\n")).toContain("<p>keep</p>")
+  })
+
+  it("drops a secret chunk and keeps the rest of the document", async () => {
+    const dir = dirWith({
+      "guide.md": `${"Public setup steps. ".repeat(80)}\npostgres` + "://db.example/app\n",
+    })
+    const loose = await buildBundle({ docsDirs: [dir], strict: false })
+    const text = loose.bundle?.chunks.map((chunk) => chunk.text).join("\n") ?? ""
+    expect(loose.rejected).toBe(false)
+    expect(loose.dropped).toBeGreaterThan(0)
+    expect(text).toContain("Public setup")
+    expect(text).not.toContain("postgres://")
+  })
 })
 
 describe("retrieve", () => {
@@ -142,5 +181,26 @@ describe("retrieve", () => {
     expect(aside.chunks).toEqual([])
     const product = retrieve(bundle, indexed, "how does p2a work", { topK: 6, contextTokens: 3500, minScore: 50 })
     expect(product.offTopic).toBe(false)
+  })
+
+  it("reuses the bundle index until the file changes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bundle-cache-"))
+    const file = {
+      version: "v1",
+      sources: [{ source: "a.md", sha256: "abc" }],
+      chunks: [{ id: "1", source: "a.md", text: "Public setup steps for p2a.", kind: "doc" }],
+    }
+    writeFileSync(join(dir, "bundle.json"), JSON.stringify(file))
+    const first = loadCachedBundle(dir)
+    const second = loadCachedBundle(dir)
+    expect(second?.index).toBe(first?.index)
+    expect(first?.bundle.version).toBe("v1")
+    writeFileSync(join(dir, "bundle.json"), JSON.stringify({ ...file, version: "v2-longer" }))
+    const third = loadCachedBundle(dir)
+    expect(third?.bundle.version).toBe("v2-longer")
+    expect(third?.index).not.toBe(first?.index)
+    writeFileSync(join(dir, "bundle.json"), "[]")
+    expect(loadCachedBundle(dir)?.bundle.chunks).toEqual([])
+    expect(loadCachedBundle(dir)?.bundle.version).toBe("none")
   })
 })

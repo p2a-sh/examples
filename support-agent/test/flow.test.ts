@@ -107,6 +107,79 @@ describe("connection policy and alerts", () => {
       policy: "manual",
     }).action).toBe("pending")
     expect(JSON.stringify(state)).not.toContain("decline")
+    const disabled = emptyConnections(NOW)
+    expect(decideConnection({ ...input, state: disabled, owner: "friendly", enabled: false }).action).toBe("pending")
+    expect(disabled.accepts).toBe(0)
+    const laterDir = folder()
+    const later = emptyConnections(new Date("2026-11-24T00:00:00.000Z"))
+    later.accepts = 3
+    const back = decideConnection({
+      ...input,
+      stateDir: laterDir,
+      now: NOW,
+      state: later,
+      owner: "friendly",
+      acceptsPerDay: 10,
+    })
+    expect(back.action).toBe("accept")
+    expect(later.day).toBe("2026-11-24")
+    expect(later.accepts).toBe(4)
+  })
+
+  it("does not count an accept when the connection call fails", async () => {
+    const stateDir = folder()
+    const cfg = baseConfig(stateDir, { ACCEPTS_PER_DAY: "1", LOG_LEVEL: "warn" })
+    const agent = new FakeAgent()
+    const secret = "connection-send-secret"
+    agent.respondConnection = async () => {
+      throw new Error(secret)
+    }
+    const logs: string[] = []
+    const original = process.stdout.write
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      logs.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    try {
+      await wireSupport(cfg, { agent, now: () => NOW })
+      await agent.connect({ linkId: "link-1", owner: "friendly" })
+    } finally {
+      process.stdout.write = original
+    }
+    const saved = JSON.parse(readFileSync(join(stateDir, "connections.json"), "utf8")) as { accepts: number }
+    expect(saved.accepts).toBe(0)
+    expect(logs.join("")).not.toContain(secret)
+    expect(logs.join("")).toContain("connection_failed")
+  })
+
+  it("returns the escalation reply when the alert send fails", async () => {
+    const stateDir = folder()
+    const cfg = baseConfig(stateDir, { LOG_LEVEL: "warn" })
+    const agent = new FakeAgent()
+    const secret = "alert-send-secret"
+    agent.send = async () => {
+      throw new Error(secret)
+    }
+    const logs: string[] = []
+    const original = process.stdout.write
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      logs.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    let text: string | void = ""
+    try {
+      await wireSupport(cfg, { agent, now: () => NOW })
+      text = await agent.request({
+        text: "I was charged twice",
+        contextId: "ctx-1",
+        sender: { did: "did:aw:sender" },
+      })
+    } finally {
+      process.stdout.write = original
+    }
+    expect(text).toContain("Billing questions")
+    expect(logs.join("")).not.toContain(secret)
+    expect(logs.join("")).toContain("alert_failed")
   })
 
   it("sends fixed alerts only to the configured address and then one summary", async () => {
@@ -133,6 +206,19 @@ describe("connection policy and alerts", () => {
         })
       }
       await dispatchAlert({
+        info: { kind: "budget_50" },
+        now: NOW,
+        state,
+        alertTo: "alerts@p2a",
+        alertsPerDay: 2,
+        logLevel: "info",
+        send: async () => {
+          throw new Error("later alerts are counted, not sent")
+        },
+      })
+      expect(state.suppressed).toBe(1)
+      expect(state.sent).toBe(2)
+      await dispatchAlert({
         info: { kind: "escalate", category: "billing", address: "ada@example.com" },
         now: NOW,
         state: emptyAlerts(NOW),
@@ -151,6 +237,22 @@ describe("connection policy and alerts", () => {
     expect(sent.some((item) => item.text.includes("ada@example.com"))).toBe(false)
     expect(logs.join("")).toContain("billing")
     expect(logs.join("")).not.toContain("ada@example.com")
+  })
+
+  it("does not roll alert counts backward", async () => {
+    const state = emptyAlerts(new Date("2026-11-24T00:00:00.000Z"))
+    state.sent = 4
+    await dispatchAlert({
+      info: { kind: "budget_50" },
+      now: NOW,
+      state,
+      alertTo: "alerts@p2a",
+      alertsPerDay: 30,
+      logLevel: "error",
+      send: async () => {},
+    })
+    expect(state.day).toBe("2026-11-24")
+    expect(state.sent).toBe(5)
   })
 
   it("keeps connection text out of the model and the logs", async () => {

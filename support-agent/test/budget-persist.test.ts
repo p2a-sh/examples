@@ -4,7 +4,8 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { loadConfig, type Config } from "../src/config.js"
 import { runSupport, wireSupport, type SupportAgent, type SupportConnection, type SupportRequest } from "../src/runtime.js"
-import { handleTurn, loadTurnState } from "../src/turn.js"
+import { rollBudget } from "../src/budget.js"
+import { emptyTurnState, handleTurn, loadTurnState } from "../src/turn.js"
 
 const NOW = new Date("2026-11-23T12:00:00.000Z")
 const YESTERDAY = "2026-11-22"
@@ -187,6 +188,91 @@ describe("support budget persistence", () => {
     const counters = savedCounters(dir)
     expect(counters.daily?.["sender:did:aw:sender"]).toEqual({ day: TODAY, count: 1 })
     expect(counters.daily?.["owner:friendly"]).toEqual({ day: TODAY, count: 1 })
+  })
+
+  it("does not roll the budget backward when a call crosses midnight", async () => {
+    const dir = folder()
+    const cfg = config(dir)
+    let now = new Date("2026-11-23T23:59:59.000Z")
+    const state = emptyTurnState(now)
+    state.budget.spent = 0.5
+    state.buckets.daily.set("sender:did:aw:other", { day: "2026-11-24", count: 2 })
+    const fetchImpl: typeof fetch = async () => {
+      now = new Date("2026-11-24T00:00:02.000Z")
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: "See the guide." } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }), { status: 200 })
+    }
+    const result = await handleTurn({
+      config: cfg,
+      state,
+      message: "how does p2a work",
+      did: "did:aw:sender",
+      owner: "owner",
+      contextId: "ctx-1",
+      now,
+      clock: () => now,
+      fetchImpl,
+    })
+    expect(result.reason).toBe("answer")
+    expect(state.budget.day).toBe("2026-11-24")
+    expect(state.budget.spent).toBeLessThan(0.5)
+    expect(state.budget.spent).toBeGreaterThan(0)
+    expect(state.buckets.daily.get("sender:did:aw:other")).toEqual({ day: "2026-11-24", count: 2 })
+    const saved = JSON.parse(readFileSync(join(dir, "counters.json"), "utf8")) as {
+      daily?: Record<string, { day: string; count: number }>
+    }
+    expect(saved.daily?.["sender:did:aw:other"]).toEqual({ day: "2026-11-24", count: 2 })
+    const reloaded = loadTurnState(dir, new Date("2026-11-23T23:59:59.000Z"))
+    expect(reloaded.buckets.daily.get("sender:did:aw:other")).toEqual({ day: "2026-11-24", count: 2 })
+    const rolled = emptyTurnState(new Date("2026-11-24T01:00:00.000Z"))
+    rolled.budget.spent = 1
+    rolled.budget.paused = true
+    rollBudget(rolled.budget, new Date("2026-11-23T23:00:00.000Z"))
+    expect(rolled.budget.day).toBe("2026-11-24")
+    expect(rolled.budget.spent).toBe(1)
+    expect(rolled.budget.paused).toBe(true)
+  })
+
+  it("returns the stored reply for the same request without another model call", async () => {
+    const dir = folder()
+    const { calls, fetchImpl } = recordingFetch("See the guide.")
+    const cfg = config(dir)
+    const state = emptyTurnState(NOW)
+    const ask = (requestId: string, message: string, current = state) => handleTurn({
+      config: cfg,
+      state: current,
+      message,
+      did: "did:aw:sender",
+      owner: "ada",
+      contextId: "c",
+      requestId,
+      now: NOW,
+      fetchImpl,
+    })
+    const first = await ask("req-1", "how does p2a work")
+    expect([...state.buckets.daily.keys()]).toContain("context:did:aw:sender:c")
+    const replay = await ask("req-1", "different text")
+    expect(replay.text).toBe(first.text)
+    expect(calls).toHaveLength(1)
+    const other = await ask("req-2", "how does p2a work")
+    expect(other.reason).toBe("limited")
+    expect(calls).toHaveLength(1)
+    const restored = loadTurnState(dir, NOW)
+    const again = await ask("req-1", "again", restored)
+    expect(again.text).toBe(first.text)
+    expect(calls).toHaveLength(1)
+  })
+
+  it("drops burst timestamps outside the sender window", () => {
+    const dir = folder()
+    const now = NOW.getTime()
+    writeFileSync(join(dir, "counters.json"), JSON.stringify({
+      bursts: { "did:did:aw:sender": [now - 60_000, now - 2 * 60 * 60 * 1000] },
+    }))
+    const state = loadTurnState(dir, NOW, 600_000)
+    expect(state.buckets.bursts.get("did:did:aw:sender")).toEqual([now - 60_000])
   })
 
   it("keeps an operator pause across the day change", () => {

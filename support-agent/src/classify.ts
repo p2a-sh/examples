@@ -27,15 +27,46 @@ const OFF_TOPIC = [
 const GENERIC_CODE = /\b(python|javascript|typescript|react|scraper)\b/i
 
 const BUG_REPORT = [
-  /\b(bug|bugs|crash|crashed|crashing|broken|regression)\b/i,
+  /\b(bug|bugs|crash(?:es|ed|ing)?|broken|regression)\b/i,
   /\b(not working|doesn'?t work|does not work|isn'?t working|is not working)\b/i,
   /\b(fails|failing|failed) to\b/i,
   /\b(problem|issue) (with|in|when)\b/i,
 ]
 
+const FEATURE = [
+  /\bfeature request\b/i,
+  /\b(?:please|can you|could you)\s+add\b/i,
+  /\bi have a suggestion\b/i,
+  /\benhancement request\b/i,
+  /\bwould be nice\b/i,
+]
+
+const FEEDBACK = [
+  /\bfeedback(?:\s+on|\s+about|:)/i,
+  /\b(?:my|some|this) feedback\b/i,
+]
+
+const FEATURE_OR_FEEDBACK = [...FEATURE, ...FEEDBACK]
+
+export type ReportKind = "bug" | "feature" | "feedback"
+
+/** Obvious reports are classified here. A bug symptom wins over a feature or feedback phrase. */
+export function reportKind(text: string): ReportKind {
+  if (isBugReport(text)) return "bug"
+  if (FEATURE.some((pattern) => pattern.test(text))) return "feature"
+  if (FEEDBACK.some((pattern) => pattern.test(text))) return "feedback"
+  return "bug"
+}
+
 export function isBugReport(text: string): boolean {
   if (/\bhow (do|can|to)\b/i.test(text)) return false
   return BUG_REPORT.some((pattern) => pattern.test(text))
+}
+
+export function isProductReport(text: string): boolean {
+  if (/\bhow (do|can|to)\b/i.test(text)) return false
+  if (isBugReport(text)) return true
+  return FEATURE_OR_FEEDBACK.some((pattern) => pattern.test(text))
 }
 
 export function classifyMessage(text: string, retrievalOffTopic: boolean): Classification {

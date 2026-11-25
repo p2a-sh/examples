@@ -6,6 +6,7 @@ import { logLine, type LogLevel } from "./log.js"
 import { readJson, writeJsonAtomic } from "./state.js"
 
 const HOUR_MS = 60 * 60 * 1000
+export const BUNDLE_REJECT_RETRY_MS = 5 * 60 * 1000
 
 export interface BundleHooks {
   build?: (request: BuildRequest) => Promise<BuildResult>
@@ -13,6 +14,7 @@ export interface BundleHooks {
   now?: () => Date
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   writeLog?: (line: string) => void
+  onRejected?: (file: string | undefined) => Promise<void> | void
 }
 
 export function bundleIsStale(stateDir: string, refreshHours: number, now: Date): boolean {
@@ -44,7 +46,13 @@ export async function refreshBundle(config: Config, hooks: BundleHooks = {}): Pr
       now: hooks.now,
     })
     if (!result.bundle || result.rejected) {
-      note(config.logLevel, "bundle_kept_previous", "bundle_rejected", hooks.writeLog)
+      const file = logFile(result.rejectedPath)
+      logBundleRejection(config.logLevel, previous != null, file, hooks.writeLog)
+      try {
+        await hooks.onRejected?.(file)
+      } catch {
+        logLine("warn", "alert_failed", { error_code: "alert_failed" }, config.logLevel, hooks.writeLog)
+      }
       return "kept"
     }
     writeJsonAtomic(config.stateDir, "bundle.json", result.bundle)
@@ -72,7 +80,8 @@ export async function bundleRefreshLoop(config: Config, signal: AbortSignal, hoo
   while (!signal.aborted) {
     const now = (hooks.now ?? (() => new Date()))()
     const remaining = msUntilDue(config.stateDir, config.bundleRefreshHours, now)
-    await sleep(remaining === 0 ? interval : remaining, signal)
+    const wait = remaining === 0 ? Math.min(BUNDLE_REJECT_RETRY_MS, interval) : remaining
+    await sleep(wait, signal)
     if (signal.aborted) return
     await refreshBundle(config, hooks)
   }
@@ -91,6 +100,27 @@ function msUntilDue(stateDir: string, refreshHours: number, now: Date): number {
 
 function note(level: LogLevel, event: string, errorCode: string, write?: (line: string) => void): void {
   logLine("warn", event, { error_code: errorCode }, level, write)
+}
+
+/** Log a rejected bundle. `file` is a path, never the matched secret. */
+export function logBundleRejection(
+  level: LogLevel,
+  previous: boolean,
+  file: string | undefined,
+  write?: (line: string) => void,
+): void {
+  const fields: Record<string, string> = { error_code: "bundle_rejected" }
+  if (file) fields.file = file
+  logLine(previous ? "warn" : "error", previous ? "bundle_kept_previous" : "bundle_rejected_no_previous", fields, level, write)
+}
+
+/** Drop query strings, emails, and addresses so a source URL cannot leak into the log. */
+export function logFile(file: string | undefined): string | undefined {
+  if (!file) return undefined
+  const cut = file.search(/[?#]/)
+  const path = (cut === -1 ? file : file.slice(0, cut)).slice(0, 300)
+  if (!path || path.includes("@") || /\b(?:\d{1,3}\.){3}\d{1,3}\b/.test(path)) return undefined
+  return path
 }
 
 function sleepBackoff(ms: number, signal: AbortSignal): Promise<void> {
